@@ -7,17 +7,21 @@ schema synchronization is disabled.
 
 ## Sunbird setup
 
-Requirements: Node.js 22, npm, PostgreSQL 15+, and Flyway (or Docker Compose).
+Requirements: Node.js 22 and npm. PostgreSQL 15+ **or** Docker Desktop.
 
-1. Copy `.env.example` to `.env` and replace all secrets.
-2. Run `npm ci`.
-3. Recreate the schema and demo data (no Docker required):
-   - If PostgreSQL is already running with `DB_*` from `.env`, run `npm run db:setup`.
-   - On a blank server, run `scripts/bootstrap-postgres.sql` as a superuser (or set `DB_ADMIN_PASSWORD` in `.env`) then `npm run db:setup`.
-   - `npm run db:migrate` applies `db/migration` only; `npm run db:seed` loads `db/seed`. Pass `--reseed` to replace demo rows.
-   - `npm run db:dump` refreshes the committed demo snapshot from the current database.
-   - `npm run migration:migrate` still runs Flyway via Docker Compose if you prefer that path.
-4. Run `npm run start:dev`.
+On a new machine, from this repo:
+
+```bash
+npm run setup:dev
+```
+
+That installs dependencies, creates `.env` (and a JWT secret), starts Postgres via Docker if nothing is listening, applies migrations, seeds demo data, and starts the API on port 8080.
+
+Windows: double-click `scripts/setup.cmd`, or run `.\scripts\setup.ps1`.
+
+`npm run setup` does the same without starting the API. Login as `admin@alrajhimedical.sa` (password in `LOCAL_CREDENTIALS.md`).
+
+Optional: `npm run db:migrate`, `npm run db:seed`, `npm run db:setup -- --reseed`, `npm run db:dump`. Docker Flyway remains `npm run migration:migrate`.
 
 The default API port is 8080. OpenAPI JSON is at `/api-docs`, Swagger UI is at
 `/swagger-ui.html`, and health is at `/api/v1/health`.

@@ -15,6 +15,8 @@
     "lint": "eslint \"{src,test}/**/*.ts\"",
     "lint:fix": "npm run lint -- --fix",
     "migration:migrate": "docker compose run --rm flyway",
+    "setup": "npm ci && node scripts/setup.js",
+    "setup:dev": "npm run setup && npm run start:dev",
     "db:setup": "node scripts/db-setup.js setup",
     "db:migrate": "node scripts/db-setup.js migrate",
     "db:seed": "node scripts/db-setup.js seed",
