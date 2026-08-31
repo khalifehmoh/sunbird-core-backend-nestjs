@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+LOCAL_CREDENTIALS.md
+npm-debug.log*
+*.tsbuildinfo
+.idea/
+.vscode/

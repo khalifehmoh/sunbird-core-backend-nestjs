@@ -1,0 +1,2 @@
+db/migration/**/*.sql text eol=lf
+db/seed/**/*.sql text eol=lf

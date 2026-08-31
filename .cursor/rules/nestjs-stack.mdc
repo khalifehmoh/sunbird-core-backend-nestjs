@@ -1,0 +1,29 @@
+---
+description: Map Java/Spring blueprint language to NestJS — never generate Java for this project
+alwaysApply: true
+---
+
+# NestJS stack override
+
+Blueprints (e.g. `docs/admin.md` in the frontend repo) were written for **Java 17 + Spring Boot**. This repository is the live backend: **NestJS + TypeORM + PostgreSQL**.
+
+## Required mapping
+
+| Blueprint says | Implement as |
+|----------------|--------------|
+| Java / Spring Boot | NestJS (TypeScript) in this repo |
+| JPA / Spring Data | TypeORM entities + repositories (`synchronize: false`) |
+| Flyway SQL | Existing `db/migration` Flyway scripts (schema authority) |
+| `@PreAuthorize` / SecurityConfig | NestJS guards, decorators, Passport JWT (existing auth patterns) |
+| DTOs / MapStruct | class-validator DTOs + mapping in services |
+| `application.properties` | `.env` + `src/config/configuration.ts` |
+| Controller → Service → Repository | NestJS Controller → Service → TypeORM |
+
+## Preserve from the blueprint
+
+Routes/prefix intent (`/api/v1`), permissions, multi-tenancy (`tenant_id` from JWT), soft delete, audit events, bilingual fields, validation rules, and agreed error shapes.
+
+## Conflicts
+
+- **Product behavior** vs code: stop and flag; do not invent scope.
+- **Framework** (Java vs NestJS): NestJS and existing repo patterns win. Never scaffold Spring/Java to “match the spec.”

@@ -1,0 +1,16 @@
+---
+description: Read the admin product blueprint for architecture, routing, and feature scope
+alwaysApply: true
+---
+
+# Project Blueprint
+
+Before answering questions about admin architecture, routes, permissions, or feature scope, read the frontend blueprint:
+
+`../sunbird-frontend/docs/admin.md`
+
+(Requires the frontend folder in the same Cursor multi-root workspace. If that path is unavailable, ask the user to open `sunbird-frontend` or paste the relevant section.)
+
+Implement backend work in **NestJS** per `nestjs-stack.mdc`. Do not generate Java/Spring code.
+
+When the user cites a section (e.g. §7.1), limit scope to that section.

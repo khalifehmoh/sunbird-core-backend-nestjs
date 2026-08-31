@@ -1,0 +1,71 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: sunbird_core_db
+      POSTGRES_USER: sunbird_app
+      POSTGRES_PASSWORD: sunbird_local_password
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sunbird_app -d sunbird_core_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - sunbird-postgres:/var/lib/postgresql/data
+
+  flyway:
+    image: flyway/flyway:11-alpine
+    command:
+      - "-url=jdbc:postgresql://postgres:5432/sunbird_core_db"
+      - "-user=sunbird_app"
+      - "-password=sunbird_local_password"
+      - "-schemas=core"
+      - "-createSchemas=true"
+      - "-baselineOnMigrate=true"
+      - "-validateOnMigrate=true"
+      - "-locations=filesystem:/flyway/sql"
+      - "migrate"
+    volumes:
+      - ./db/migration:/flyway/sql:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: sunbird_core_db
+      DB_USERNAME: sunbird_app
+      DB_PASSWORD: sunbird_local_password
+      JWT_SECRET: local-development-secret-change-before-production
+      JWT_ACCESS_TOKEN_EXPIRY_MS: 900000
+      JWT_REFRESH_TOKEN_EXPIRY_MS: 604800000
+      JWT_REMEMBER_ME_REFRESH_TOKEN_EXPIRY_MS: 2592000000
+      COOKIE_SECURE: "false"
+      COOKIE_SAME_SITE: lax
+      CORS_ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000
+    ports:
+      - "8080:8080"
+    depends_on:
+      flyway:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:8080/api/v1/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  sunbird-postgres:
