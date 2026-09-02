@@ -32,23 +32,40 @@ has a specific library choice to get right up front, not a fundamental gap.
 | Legacy device/HL7v2 (MLLP), DICOM (imaging), ASTM (lab instruments) interfacing | **Closed by the Medplum Agent** | The **Medplum Agent** is a lightweight, open-source (Apache-2.0), actively maintained service that runs inside the hospital network and bridges HL7v2/MLLP, DICOM, and ASTM to the cloud over secure HTTPS WebSockets — Medplum positions this explicitly as the modern, cloud-native replacement for Mirth Connect following Mirth's move to a commercial license. The device-specific message mapping (see note below) still runs as a TypeScript Bot; the Agent only handles secure protocol bridging, so nobody on the team needs to write Java or operate a full legacy interface engine | Prefer the Medplum Agent over hand-rolling `node-hl7-client`/`node-hl7-server`/`@cosyte/mllp` once Medplum is in the stack for FHIR anyway — it is purpose-built, covers DICOM/ASTM in addition to HL7v2, and is actively maintained. **Reminder from the HL7-adapters discussion:** the Agent does not eliminate the need to map each device's specific message fields by hand — that work is inherent to HL7v2 in any stack — it eliminates the need to build/secure the network bridge and removes the Java dependency entirely. |
 | Raw throughput at large multi-hospital scale, or formal FHIR/ONC certification | **Watch, not a current blocker** | JVM/Kafka-Java tends to win at very large sustained throughput, and HAPI-based FHIR servers have broader track record in formal certification contexts than Medplum | Revisit if/when the platform needs to scale past a single hospital's ICU + patient-management load, or needs a specific compliance certification that names a particular FHIR server implementation. Not relevant at current scope. |
 
-## Medplum adoption shape (if adopted, not just as a FHIR client)
+## Medplum adoption shape: NestJS is the one front door, Medplum is an internal engine
 
-Given the Mantine/React overlap and the Agent closing the device-integration gap,
-Medplum is worth adopting as more than a FHIR data store — but not as a full
-replacement for this repo. Recommended split:
+Medplum's server is a full, separate Express application with its own database
+schema, auth, and release process — it cannot be merged into the NestJS process
+itself (different framework, different schema than the Flyway-owned `core`
+schema, different upgrade lifecycle). Two running services is unavoidable. What
+*is* avoidable is making that visible to anyone outside the team. Target shape:
 
-- **Medplum owns**: FHIR resources (`Patient`, `Encounter`, `Observation`,
-  `DiagnosticReport`, etc.), the patient-management/ICU-facing React screens (via
-  `@medplum/react`), the device bridge (Agent), and reactive automation (Bots).
-- **This NestJS service keeps owning**: tenants, staff/user accounts, roles and
-  permissions, and any data that doesn't naturally fit the FHIR resource model —
-  i.e. everything already built here.
-- **The seam between them**: a normal API/token boundary, not a shared login
-  system. Decide explicitly whether Sunbird's existing JWT/cookie auth is the
-  source of truth (with Medplum trusting those tokens) or whether Medplum's own
-  auth model is used for clinical-app users — don't let both run independently
-  for the same humans.
+- **One deployment unit**: add the Medplum server (and its own Postgres/Redis) as
+  additional services in this repo's `docker-compose.yml`, brought up together
+  with `npm run docker:up`, the same way Postgres already is. Not a separately
+  managed system.
+- **One front door**: no external caller (frontend, third party, mobile app) ever
+  talks to Medplum directly. This NestJS service is the only exposed API surface;
+  it calls Medplum internally (via `@medplum/core` as a plain client library, the
+  same way it already calls TypeORM/Postgres) and serves the result under the
+  existing `/api/v1/...` routes. Medplum is an implementation detail behind this
+  service, not a second API.
+- **One login**: keep Sunbird's existing JWT/cookie auth as the *only* login users
+  see. Configure Medplum to trust an external identity provider (its own auth
+  supports this) instead of running its own separate signup/login. No second
+  login screen, no two independent identities for the same human.
+- **One frontend**: `@medplum/react` components are imported directly into the
+  existing React app like any other component library — there is no separate
+  frontend to stand up.
+- **Bots and the Agent are internal plumbing**: background automation and device
+  bridging that run as part of this stack's infrastructure, invisible to anyone
+  using the product — conceptually the same as a background job worker today.
+- **Data ownership stays split even though the deployment doesn't feel split**:
+  Medplum's own schema holds FHIR resources (`Patient`, `Encounter`,
+  `Observation`, etc.); this service's existing `core` schema keeps owning
+  tenants, staff accounts, roles/permissions, and anything that doesn't naturally
+  fit the FHIR resource model. That boundary is internal wiring, not something
+  users or API callers ever see.
 - **Bots vs. Temporal**: use Bots for single-step reactions to FHIR data changes;
   keep Temporal (or equivalent) for genuinely multi-step, compensable care
   pathways. Bots triggering into a Temporal workflow is fine; a long chain of
@@ -60,7 +77,7 @@ Run these as short, throwaway spikes, not production code, before building the r
 patient-management/ICU modules on top of these choices:
 
 1. **Event-driven spike**: a NestJS producer/consumer using `@confluentinc/kafka-javascript` (or start with a lighter broker — NATS/RabbitMQ/Redis Streams via `@nestjs/microservices` — if Kafka's operational overhead isn't justified yet for a 3-person team). Verify retry/idempotency semantics for something like a `vital-sign-recorded` or `patient-admitted` event.
-2. **FHIR + UI spike**: stand up a self-hosted Medplum instance, model `Patient`, `Encounter`, and `Observation`, and build one real patient-management screen with `@medplum/react` against the existing Mantine theme to confirm it actually looks/feels native rather than bolted on.
+2. **FHIR + UI spike**: add Medplum's server to this repo's `docker-compose.yml`, model `Patient`, `Encounter`, and `Observation`, call it from a NestJS service via `@medplum/core` proxied under `/api/v1/...`, and build one real patient-management screen with `@medplum/react` against the existing Mantine theme — confirming both that the UI looks native and that no external caller ever needs to know Medplum exists as a separate service.
 3. **ICU real-time spike**: a WebSocket/MQTT gateway (or Medplum's `useSubscription`) simulating concurrent bedside streams at a realistic bed count and sample rate, load-tested with a deliberately CPU-heavy step included, to confirm event-loop behavior under load.
 4. **Device bridge spike**: configure a Medplum Agent endpoint for one real device type (HL7v2/MLLP or DICOM), write the minimal Bot that accepts and acknowledges it, and confirm the message-mapping effort matches expectations from the HL7-adapters discussion.
 5. **Auth-seam spike**: decide and prototype how Sunbird's existing JWT/cookie auth and Medplum's auth model relate for the same clinical-app users, before real patient data flows through both systems.
