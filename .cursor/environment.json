@@ -1,0 +1,19 @@
+{
+  "name": "Sunbird Core Backend (NestJS)",
+  "user": "ubuntu",
+  "install": "bash .cursor/install.sh",
+  "start": "bash .cursor/start.sh",
+  "terminals": [
+    {
+      "name": "api",
+      "command": "npm run start:dev",
+      "description": "NestJS API (watch mode) on http://localhost:8080 — health at /api/v1/health, Swagger UI at /swagger-ui.html."
+    }
+  ],
+  "ports": [
+    {
+      "name": "api",
+      "port": 8080
+    }
+  ]
+}
