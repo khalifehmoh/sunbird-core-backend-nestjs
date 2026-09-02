@@ -71,6 +71,32 @@ schema, different upgrade lifecycle). Two running services is unavoidable. What
   pathways. Bots triggering into a Temporal workflow is fine; a long chain of
   Bots standing in for a saga is not.
 
+## Ongoing maintenance effort
+
+Adopting Medplum behind this NestJS service adds real, recurring maintenance
+surface, not just one-time integration work:
+
+| Piece | What "maintaining" it means | Cadence | AI-agent-automatable? |
+|---|---|---|---|
+| Medplum server upgrades | Apply their version upgrade guides and per-release DB migrations, fix breaking API changes, run tests | Periodic — do not let this drift the way Mirth users let Mirth drift | **Yes, largely** — changelog triage, code updates for breaking changes, and test runs are good agent work; human sign-off still required before shipping anything touching patient data |
+| Medplum's own Postgres schema | Backups, monitoring — same discipline already applied to the `core` schema | Ongoing, low effort | Partly — backup/monitoring automation is standard DevOps tooling, not really an "AI" task; prefer managed Postgres over self-hosting to remove most of this regardless |
+| Redis (new dependency — not run today) | Patching/monitoring | Ongoing, low effort | Same as above — a managed Redis instance removes most of this burden more directly than automation would |
+| Bots | Write, test, deploy each automation function | Only when automation logic changes | **Yes** — drafting the function and tests is good agent work; review before deploying anything that touches PHI |
+| Medplum Agent (per hospital site) | Approve and apply remote upgrades on physical, on-prem installs | Per-site, occasional | **No** — this is a physical/change-control gate (live equipment on a hospital network, usually inside a maintenance window), not a skill or tooling gap |
+| Auth trust config | Keep NestJS-issued tokens and Medplum's trust config in sync | Rare | Partly — an agent can update code when the format changes, but someone has to notice/decide it needs to change |
+| Monitoring / on-call | Figure out which of the two services failed and why | Ongoing | **Yes** — log correlation and failure triage across services is a good fit for agent-assisted debugging |
+
+**Bottom line**: a meaningful share of the recurring work (version bumps, Bot
+authoring, on-call triage) is genuinely a good fit for AI-agent assistance, and
+this team is already positioned to use it that way. What doesn't shrink,
+regardless of tooling, is anything gated by compliance sign-off on
+patient-data-touching changes or by physical/change-control access to on-prem
+equipment — those stay human tasks by design, not by capability gap. Compared to
+the original Java/Spring + HAPI + Mirth path, this is still net less effort for
+this specific team, since that path adds a second *runtime* (JVM: separate
+deploy pipeline, GC tuning, patching) that only 2 of 3 engineers could maintain,
+on top of all the same categories of ongoing work above.
+
 ## De-risking plan (do before deep investment)
 
 Run these as short, throwaway spikes, not production code, before building the real
