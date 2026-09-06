@@ -131,3 +131,25 @@ Reopen this decision only if one of these becomes true, not preemptively:
 - A required compliance certification explicitly names a specific FHIR server implementation that Medplum doesn't satisfy.
 - The device/interface catalog grows large enough that hand-built HL7v2/MLLP adapters become the team's main maintenance burden — at that point, isolate an interface engine (see table above) rather than reconsidering the whole backend framework.
 - The team grows past ~5 engineers with dedicated ops capacity — the "managed everything, defer heavy infra" rules above can then be relaxed selectively.
+
+## Presentable version
+
+[`backend-stack-evaluation.html`](./backend-stack-evaluation.html) is a
+self-contained rendering of this evaluation (no build step, no dependencies) —
+open it directly in a browser to share with the team.
+
+## Prompt to resume
+
+Next step agreed but not started: the Medplum spike, on its own branch, with the
+ICU real-time spike explicitly out of scope for now.
+
+```text
+Run the Medplum de-risking spike from @docs/backend-stack-decision.md on a new branch.
+Scope: spikes 2 (FHIR + UI), 4 (device bridge), 5 (auth seam) — skip the ICU real-time spike.
+Add the Medplum server + its Postgres/Redis to docker-compose.yml.
+Call Medplum from a NestJS module via @medplum/core, proxied under /api/v1 — Medplum stays internal.
+Build one React page using @medplum/react on the existing Mantine theme (frontend repo).
+Keep Sunbird's existing JWT/cookie auth as the single source of truth; Medplum trusts it.
+Flyway stays the authority for the core schema; Medplum owns its own schema separately.
+Throwaway spike code — evaluate fit, do not build the real patient-management module yet.
+```
