@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Backend Stack Evaluation — Spring Boot vs NestJS</title>
+<style>
+  :root {
+    --text: #1c1e21; --text2: #4b5563; --text3: #8a919c;
+    --line: #e3e6ea; --panel: #f5f7f9; --chip: #eef1f4;
+    --accent: #2e6fae; --green: #1f8a65; --amber: #b97c22; --red: #bb4444; --blue: #2e79b5; --grey: #9aa1ab;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #ffffff; color: var(--text);
+    font: 15px/1.55 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .page { max-width: 1160px; margin: 0 auto; padding: 40px 44px 48px; }
+  h1 { font-size: 27px; line-height: 1.25; margin: 0 0 6px; letter-spacing: -0.01em; }
+  h2 { font-size: 19px; margin: 40px 0 6px; letter-spacing: -0.01em; }
+  p.sub { color: var(--text2); margin: 0 0 4px; }
+  p.cap { color: var(--text3); font-size: 13px; margin: 6px 0 10px; }
+  code { background: var(--chip); border-radius: 4px; padding: 1px 5px; font-size: 0.86em;
+         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+  .decision { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+              padding: 22px 24px; margin-top: 22px; display: flex; gap: 28px; align-items: flex-start; }
+  .decision .main { flex: 1; }
+  .decision .label { font-size: 11.5px; font-weight: 700; letter-spacing: 0.09em; color: var(--text3); }
+  .decision .headline { font-size: 19px; font-weight: 650; margin: 6px 0 8px; line-height: 1.35; }
+  .decision .body { color: var(--text2); font-size: 14.5px; margin: 0; }
+  .stats { display: flex; gap: 26px; padding-top: 4px; }
+  .stat .v { font-size: 24px; font-weight: 700; line-height: 1.1; }
+  .stat .l { font-size: 12.5px; color: var(--text3); margin-top: 3px; max-width: 120px; }
+  .stat.good .v { color: var(--green); } .stat.bad .v { color: var(--red); }
+
+  table { width: 100%; border-collapse: collapse; border: 1px solid var(--line);
+          border-radius: 8px; overflow: hidden; font-size: 14px; }
+  th { text-align: left; font-size: 12.5px; letter-spacing: 0.03em; color: var(--text3);
+       font-weight: 650; padding: 9px 14px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  td { padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; color: var(--text2); }
+  td:first-child { color: var(--text); font-weight: 550; }
+  tr:last-child td { border-bottom: none; }
+  tr:nth-child(even) td { background: #fafbfc; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; vertical-align: 1px; }
+  .d-green { background: var(--green); } .d-amber { background: var(--amber); }
+  .d-blue { background: var(--blue); } .d-grey { background: var(--grey); } .d-red { background: var(--red); }
+  td.edge { white-space: nowrap; font-weight: 600; color: var(--text); }
+
+  .diagram { border: 1px solid var(--line); border-radius: 10px; padding: 16px; background: #fbfcfd; }
+
+  ol.phases { margin: 8px 0 0; padding-left: 22px; color: var(--text2); }
+  ol.phases li { margin-bottom: 8px; }
+  ol.phases b { color: var(--text); }
+
+  ul.spikes { list-style: none; margin: 8px 0 0; padding: 0; }
+  ul.spikes li { padding: 8px 0 8px 30px; position: relative; color: var(--text2); border-bottom: 1px solid var(--line); }
+  ul.spikes li:last-child { border-bottom: none; }
+  ul.spikes li::before { content: ""; position: absolute; left: 4px; top: 13px; width: 12px; height: 12px;
+                         border: 1.6px solid var(--text3); border-radius: 50%; }
+
+  .footer { margin-top: 36px; padding-top: 14px; border-top: 1px solid var(--line);
+            color: var(--text3); font-size: 12.5px; }
+
+  body.part1 .s2, body.part1 .s3 { display: none; }
+  body.part2 .s1, body.part2 .s3 { display: none; }
+  body.part3 .s1, body.part3 .s2 { display: none; }
+  body.part2 .page, body.part3 .page { padding-top: 28px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+<div class="s1">
+  <h1>Backend Stack Evaluation — Spring Boot vs NestJS</h1>
+  <p class="sub">Sunbird healthcare backend, scoped to the upcoming patient management and ICU modules, with FHIR,
+  HL7 device integration, and event-driven processing on the roadmap. Two engineers on the project.</p>
+
+  <div class="decision">
+    <div class="main">
+      <div class="label">DECISION</div>
+      <div class="headline">Build on NestJS, with Medplum as the internal FHIR engine behind a single front door.</div>
+      <p class="body">With two engineers, any component only one person can maintain has a bus factor of exactly one.
+      Java components would have at most one maintainer; NestJS components have two. Every gap that pointed toward
+      Spring now has a TypeScript-native answer — and at this team size, operate managed, pre-built services rather
+      than building or self-hosting infrastructure.</p>
+    </div>
+    <div class="stats">
+      <div class="stat good"><div class="v">2 of 2</div><div class="l">can maintain NestJS</div></div>
+      <div class="stat bad"><div class="v">1 of 2</div><div class="l">can maintain Java, at most</div></div>
+      <div class="stat"><div class="v">6</div><div class="l">validation spikes queued</div></div>
+    </div>
+  </div>
+
+  <h2>Factor-by-factor comparison</h2>
+  <p class="cap">Dot marks where the edge lands: green favors NestJS, amber favors Spring, blue is a genuine tie, grey depends on workload.</p>
+  <table>
+    <tr><th>Factor</th><th>Spring Boot</th><th>NestJS + Medplum</th><th>Edge</th></tr>
+    <tr><td><span class="dot d-blue"></span>Enterprise / healthcare compliance</td><td>Mature enterprise frameworks, familiar to healthcare IT auditors</td><td>Medplum brings SOC 2 Type 2 and HIPAA-oriented design</td><td class="edge">Even</td></tr>
+    <tr><td><span class="dot d-amber"></span>Security</td><td>Spring Security; deep method-level authorization, long track record</td><td>Guards + Passport, already built here; more assembled by hand</td><td class="edge">Spring</td></tr>
+    <tr><td><span class="dot d-grey"></span>Runtime performance</td><td>Better on CPU-bound work (validation, terminology, crypto)</td><td>Better on I/O-bound APIs; lighter per-instance footprint</td><td class="edge">Workload</td></tr>
+    <tr><td><span class="dot d-green"></span>Compatibility with React</td><td>Separate language; DTOs duplicated or generated across a bridge</td><td>Same TypeScript end to end; <code>@medplum/react</code> is built on Mantine v8</td><td class="edge">NestJS</td></tr>
+    <tr><td><span class="dot d-green"></span>Development speed</td><td>Compile cycles and more ceremony per feature</td><td>Hot reload, one language, pre-built FHIR screens</td><td class="edge">NestJS</td></tr>
+    <tr><td><span class="dot d-amber"></span>Transactions / multi-step workflows</td><td><code>@Transactional</code>, State Machine, Camunda — declarative</td><td>TypeORM transactions; FHIR <code>Task</code> + Bots now, Temporal later</td><td class="edge">Spring</td></tr>
+    <tr><td><span class="dot d-blue"></span>Scaling and async processing</td><td>Kafka-Java client, mature backpressure patterns</td><td>Bots + BullMQ now; managed Kafka via Confluent JS client if needed</td><td class="edge">Even</td></tr>
+    <tr><td><span class="dot d-green"></span>Long-term maintainability</td><td>Verbose but predictable; larger Java hiring pool</td><td>Less boilerplate, and both engineers can maintain it</td><td class="edge">NestJS</td></tr>
+    <tr><td><span class="dot d-blue"></span>FHIR development</td><td>HAPI FHIR — the gold-standard implementation</td><td>Medplum — TypeScript FHIR server with terminology validation</td><td class="edge">Even</td></tr>
+    <tr><td><span class="dot d-blue"></span>HL7v2 / DICOM / device integration</td><td>Interface engines lead, but Mirth Connect is commercial since v4.6</td><td>Medplum Agent (Apache-2.0) bridges HL7v2, DICOM, ASTM</td><td class="edge">Even</td></tr>
+  </table>
+</div>
+
+<div class="s2">
+  <h2>How it fits together</h2>
+  <p class="sub">Medplum's server cannot merge into the NestJS process — different framework, different schema, its own
+  release cycle. It runs as a second service behind a single front door: same <code>docker-compose.yml</code>, one login,
+  one API surface. No caller ever needs to know it is there.</p>
+  <div class="diagram">
+    <svg viewBox="0 0 700 350" style="width:100%;height:auto;display:block" role="img"
+         aria-label="React app calls the NestJS API, the only exposed surface; behind it sit the core Postgres schema and the Medplum FHIR engine, with the on-prem Medplum Agent feeding device data into Medplum.">
+      <rect x="175" y="6" width="350" height="46" rx="6" fill="#eef1f4" stroke="#c9cfd6"/>
+      <text x="350" y="26" text-anchor="middle" fill="#1c1e21" font-size="13" font-weight="600">React app</text>
+      <text x="350" y="42" text-anchor="middle" fill="#4b5563" font-size="11">Mantine v8 + @medplum/react components</text>
+      <line x1="350" y1="52" x2="350" y2="74" stroke="#9aa1ab" stroke-width="1.5"/>
+      <polygon points="350,80 345,72 355,72" fill="#9aa1ab"/>
+      <rect x="95" y="82" width="510" height="56" rx="6" fill="#eef1f4" stroke="#2e6fae" stroke-width="1.6"/>
+      <text x="350" y="106" text-anchor="middle" fill="#1c1e21" font-size="13" font-weight="600">NestJS API — the only externally exposed surface</text>
+      <text x="350" y="124" text-anchor="middle" fill="#4b5563" font-size="11">/api/v1 · auth, tenants, roles, permissions · proxies FHIR calls inward</text>
+      <line x1="350" y1="138" x2="350" y2="156" stroke="#9aa1ab" stroke-width="1.5"/>
+      <line x1="210" y1="156" x2="490" y2="156" stroke="#9aa1ab" stroke-width="1.5"/>
+      <line x1="210" y1="156" x2="210" y2="176" stroke="#9aa1ab" stroke-width="1.5"/>
+      <polygon points="210,182 205,174 215,174" fill="#9aa1ab"/>
+      <line x1="490" y1="156" x2="490" y2="176" stroke="#9aa1ab" stroke-width="1.5"/>
+      <polygon points="490,182 485,174 495,174" fill="#9aa1ab"/>
+      <rect x="95" y="182" width="230" height="58" rx="6" fill="#eef1f4" stroke="#c9cfd6"/>
+      <text x="210" y="206" text-anchor="middle" fill="#1c1e21" font-size="13" font-weight="600">core schema (Postgres)</text>
+      <text x="210" y="224" text-anchor="middle" fill="#4b5563" font-size="11">tenants, users, roles — Flyway-owned</text>
+      <rect x="375" y="182" width="230" height="58" rx="6" fill="#eef1f4" stroke="#c9cfd6"/>
+      <text x="490" y="206" text-anchor="middle" fill="#1c1e21" font-size="13" font-weight="600">Medplum FHIR engine</text>
+      <text x="490" y="224" text-anchor="middle" fill="#4b5563" font-size="11">Patient, Encounter, Observation + Bots</text>
+      <line x1="490" y1="280" x2="490" y2="248" stroke="#9aa1ab" stroke-width="1.5"/>
+      <polygon points="490,242 485,250 495,250" fill="#9aa1ab"/>
+      <rect x="375" y="280" width="230" height="52" rx="6" fill="#eef1f4" stroke="#c9cfd6"/>
+      <text x="490" y="302" text-anchor="middle" fill="#1c1e21" font-size="13" font-weight="600">Medplum Agent (on-prem)</text>
+      <text x="490" y="320" text-anchor="middle" fill="#4b5563" font-size="11">HL7v2 / MLLP · DICOM · ASTM</text>
+    </svg>
+  </div>
+  <p class="cap">Arrows are internal calls. Only the NestJS API is externally reachable; the Agent makes outbound
+  connections only, so no inbound firewall rule is needed at the hospital.</p>
+
+  <h2>Risk register</h2>
+  <p class="cap">The concern behind this evaluation was discovering a limitation after committing. These are the ones worth knowing up front, and what closes each.</p>
+  <table>
+    <tr><th>Risk</th><th>Verdict</th><th>What closes it</th></tr>
+    <tr><td><span class="dot d-amber"></span>NestJS Kafka transport wraps <code>kafkajs</code>, unmaintained since Feb 2023</td><td>Deferred</td><td>Skip Kafka at this team size: Bots + BullMQ on Medplum's Redis first; managed Kafka with <code>@confluentinc/kafka-javascript</code> only if ordered multi-consumer streams are measured as necessary</td></tr>
+    <tr><td><span class="dot d-green"></span>FHIR server and validation maturity outside the JVM</td><td>Closed</td><td>Medplum — Apache-2.0 TypeScript FHIR server, SOC 2 Type 2</td></tr>
+    <tr><td><span class="dot d-green"></span>Multi-step care pathways needing compensation on failure</td><td>Staged</td><td>FHIR <code>Task</code> + Bots carry early workflows; graduate to Temporal (prefer Temporal Cloud) when compensation-on-failure is genuinely needed</td></tr>
+    <tr><td><span class="dot d-green"></span>Bridging bedside monitors, imaging modalities, lab analyzers</td><td>Closed</td><td>Medplum Agent runs on-prem, streams HL7v2/DICOM/ASTM to the server over WSS</td></tr>
+    <tr><td><span class="dot d-blue"></span>Reacting automatically to new or updated clinical data</td><td>Partly closed</td><td>Medplum Bots (Subscriptions + cron) for single-hop reactions; Kafka only if ordered multi-consumer streams are needed</td></tr>
+    <tr><td><span class="dot d-amber"></span>ICU real-time streams stalling the event loop under load</td><td>Needs spike</td><td>Load-test a realistic bed count with a CPU-bound alarm step; move it to <code>worker_threads</code> if it stalls</td></tr>
+    <tr><td><span class="dot d-grey"></span>Per-device HL7v2 field mapping effort</td><td>Unavoidable</td><td>Custom work in every stack — HL7v2 is customized per site and vendor; no tool removes it</td></tr>
+    <tr><td><span class="dot d-amber"></span>Saudi data residency (PDPL) and NPHIES integration</td><td>Decide first</td><td>Health data transfer restrictions likely rule out Medplum's US-hosted cloud — self-host in an approved region on managed Postgres/Redis; NPHIES being FHIR R4-based strengthens the FHIR-native core</td></tr>
+    <tr><td><span class="dot d-grey"></span>Multi-hospital throughput, or certification naming a specific FHIR server</td><td>Watch</td><td>Revisit only if scale or a named-implementation requirement appears</td></tr>
+  </table>
+</div>
+
+<div class="s3">
+  <h2>Ongoing maintenance</h2>
+  <table>
+    <tr><th>Task</th><th>Cadence</th><th>Realistic to automate with AI agents?</th></tr>
+    <tr><td>Medplum server version upgrades</td><td>Periodic — do not let it drift</td><td>Largely yes — changelog triage, breaking-change fixes, test runs</td></tr>
+    <tr><td>Medplum Postgres schema and Redis</td><td>Ongoing, low effort</td><td>Partly — managed hosting removes more of this than automation does</td></tr>
+    <tr><td>Bots (write, test, deploy)</td><td>On automation change</td><td>Yes — with human review before anything PHI-touching ships</td></tr>
+    <tr><td>Medplum Agent updates, per hospital site</td><td>Occasional, per site</td><td>No — physical and change-control gate on live equipment</td></tr>
+    <tr><td>Auth trust config between NestJS and Medplum</td><td>Rare</td><td>Partly — an agent can apply it; a human has to notice it is needed</td></tr>
+    <tr><td>Two-service monitoring and on-call triage</td><td>Ongoing</td><td>Yes — cross-service log correlation suits agent-assisted debugging</td></tr>
+  </table>
+  <p class="cap">What does not shrink with better tooling: compliance sign-off on patient-data-touching changes, and
+  physical change-control access to on-prem Agent installs. Both are gates by design, not capability gaps.</p>
+
+  <h2>Build order</h2>
+  <ol class="phases">
+    <li><b>Foundation:</b> Medplum in <code>docker-compose.yml</code>, auth seam (Sunbird JWT as the single source of
+    truth), one patient screen via <code>@medplum/react</code> proxied under <code>/api/v1</code> — validates the three
+    riskiest seams at once.</li>
+    <li><b>Patient management:</b> CRUD-heavy, lowest technical risk; exercises <code>Task</code>-based workflows and Bots.</li>
+    <li><b>ICU module last:</b> highest technical risk (real-time load, alarm logic, device bridging) — lands on a proven
+    foundation, after the event-loop load spike has run.</li>
+  </ol>
+
+  <h2>Validate before deep investment</h2>
+  <ul class="spikes">
+    <li>Event-driven spike: one clinical reaction built twice — as a Medplum Bot on a Subscription and as a BullMQ job — to establish which pattern fits which class of event (no Kafka)</li>
+    <li>Add Medplum to docker-compose, proxy it under /api/v1, and build one patient screen with @medplum/react on the existing Mantine theme</li>
+    <li>ICU real-time spike: realistic bed count and sample rate, with a deliberately CPU-heavy alarm step included</li>
+    <li>Device bridge spike: one Medplum Agent endpoint plus the minimal Bot that acknowledges and maps a real device's messages</li>
+    <li>Auth seam: make Sunbird's existing JWT the single source of truth and have Medplum trust it — before real patient data flows</li>
+    <li>Workflow spike: one care pathway as FHIR Task transitions driven by Bots; only repeat it in Temporal if compensation-on-failure is genuinely needed</li>
+  </ul>
+
+  <div class="footer">
+    Source: evaluation recorded in docs/backend-stack-decision.md, September 2026. Reference points include kafkajs
+    issue #1603 (unmaintained since February 2023), NextGen's Mirth Connect v4.6 license change (March 2025), and
+    Medplum's Apache-2.0 server, Agent, and Mantine-based React library. Colored dots encode the verdict columns;
+    they carry no severity meaning. The same analysis is mirrored in prose on pull request #2 of
+    sunbird-core-backend-nestjs.
+  </div>
+</div>
+
+</div>
+</body>
+</html>
