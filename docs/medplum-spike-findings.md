@@ -21,12 +21,16 @@ boundary between Medplum's authorization model and this service's:
 
 1. The gateway's allow-list is not sized by the module you are building; it is
    sized by what the component library asks for (see below).
-2. Tenant isolation done in application code is ours to maintain, and `$graphql`
-   punches a hole straight through it.
+2. Tenant isolation done in application code is ours to maintain, and it has
+   five confirmed bypasses — not only `$graphql`, but also cross-tenant
+   overwrite and delete through conditional writes (see
+   [Confirmed tenant bypasses](#confirmed-tenant-bypasses)).
 
 Neither is a blocker for the spike. Both need to be closed before real patient
-data flows, and the fix for both is the same: per-tenant Medplum
-`AccessPolicy`, which is exactly the part of spike 5 that was not prototyped.
+data flows, and the fix for both is the same: put the tenant boundary inside
+Medplum — one `Project` per tenant, with this service calling On-Behalf-Of the
+real user — which is exactly the part of spike 5 that was not prototyped. See
+[Spike 5 plan](#spike-5-plan-project-per-tenant--on-behalf-of).
 
 ## What was built
 
@@ -73,9 +77,11 @@ extension — which is what NPHIES and other R4 consumers expect to receive, and
 strictly better than the `*_ar` sibling columns the `core` schema uses. National
 ID and Iqama map to their distinct NPHIES identifier systems, MRN to a local one.
 
-**Tenant isolation held under test.** Cross-tenant reads, writes, and deletes
-were all rejected through the gateway, returning 404
-rather than 403 so the API never confirms that an out-of-scope id exists.
+**Tenant isolation held for the paths that were tested.** Cross-tenant reads,
+writes, and deletes *by id*, and type-level searches, were all rejected or
+scoped through the gateway, returning 404 rather than 403 so the API never
+confirms that an out-of-scope id exists. Other request shapes are not covered —
+see [Confirmed tenant bypasses](#confirmed-tenant-bypasses).
 
 ## What cost more than expected
 
@@ -89,11 +95,35 @@ it will render. Plan the gateway policy around what `@medplum/react` asks for;
 components. Each addition is a real decision, because a resource type on the
 read-only list skips tenant filtering by design.
 
-**`$graphql` bypasses the tenant filter.** Search scoping works by forcing a
-`_tag` parameter, and there is no equivalent for a GraphQL query body. The
-operation is currently forwarded as-is, which is acceptable for a spike with
-seeded data and is not acceptable with real PHI. It is not fixable at the
-parameter level; it needs Medplum-side authorization.
+### Confirmed tenant bypasses
+
+Search scoping works by forcing a `_tag` parameter onto type-level searches and
+checking the tag on instance reads. Every request shape that does neither goes
+to Medplum under the shared service account, which can see every tenant.
+Reproduced by driving the real `FhirGatewayController` as a tenant A user
+against a stub `MedplumService` that records what is forwarded; that Medplum
+accepts each shape is confirmed from `@medplum/fhir-router` (`PUT`/`DELETE`/
+`PATCH :resourceType` are conditional update/delete/patch). Controls passed:
+`GET Patient/<tenant-B-id>` → 404, and `GET Patient?name=…` gets `_tag` forced.
+
+| # | Request (as tenant A) | What the gateway does | Effect |
+|---|---|---|---|
+| 1 | `PUT Patient?identifier=<nphies national id>` | Tags the body for tenant A, forwards the caller's query **without** `_tag` | Overwrites whichever patient matches, in any tenant, and re-tags it to tenant A — the record moves across tenants. National IDs are not secret. |
+| 2 | `DELETE Patient?identifier=…` | Forwards the caller's query without `_tag` | Deletes another tenant's patient |
+| 3 | `POST $graphql` | Forwards the body as-is | Reads every tenant's data |
+| 4 | `GET Observation?_include=Observation:subject` (and `_revinclude`) | Forces `_tag` on the base type only; included entries pass through | Returns another tenant's `Patient` once a reference to it exists |
+| 5 | `POST Observation` with `subject: Patient/<tenant-B-id>` | Tags the body; never checks references | Plants data on another tenant's patient — combined with #4 it is a read; it also shows up in that tenant's `Patient/<id>/$everything`, which is forwarded untouched |
+
+Related, not a bypass of tenant scope but of role: neither the gateway, the ADT
+controller, nor the frontend `clinical` routes check `PATIENT_MGMT_*` permission
+codes, so any authenticated user in a tenant (including lab-only accounts) can
+read and write all 20 writable clinical resource types and run ADT actions. There is no
+branch-level scoping at all.
+
+None of these is fixable by adding more checks to the gateway without the list
+growing with every FHIR feature the components use — which is the
+"standing liability" below in concrete form. All five disappear once tenants
+are separate Medplum Projects and calls carry the end user's identity.
 
 **Application-level tenant scoping is a standing liability.** One shared Medplum
 service account plus "NestJS decides who sees what" is straightforward to write
@@ -106,7 +136,10 @@ parser ignores `application/fhir+json` until widened. `@medplum/react` sends an
 `X-Medplum` header on every call, which fails CORS preflight until allow-listed
 even though the gateway drops it. `medplum.getProfile()` is undefined under the
 cookie-proxy model, so components that attribute authorship — timeline comments,
-signatures — do not work without a real Medplum identity per user.
+signatures — do not work without a real Medplum identity per user. The spike
+commit left `package-lock.json` out of sync with `package.json` (missing
+`@emnapi/core`/`@emnapi/runtime`), so `npm ci` — and therefore `npm run setup`
+and any CI/Docker build using it — fails until the lockfile is regenerated.
 
 ## Auth seam: what is settled and what is not
 
@@ -116,12 +149,91 @@ credentials. That much is prototyped and works.
 
 Not settled, and the substance of spike 5: the API currently talks to Medplum as
 a single all-powerful service account, with all per-user and per-tenant
-authorization implemented on this side. The alternative — Medplum trusting
-Sunbird-issued tokens as an external identity provider, with a per-tenant
-`AccessPolicy` and one Medplum identity per user — was not built. It is what
-closes the `$graphql` hole and removes the liability above, and it also restores
-the authorship-dependent components. **Recommendation: finish spike 5 before
-building the real module, not after.**
+authorization implemented on this side.
+
+Decided since: keep this service as the only caller, but stop calling as the
+bare service account. Medplum's
+[On-Behalf-Of](https://www.medplum.com/docs/auth/on-behalf-of) feature is built
+for exactly this shape ("the Customer Server Side App is the only system
+component that interacts with Medplum Server"): the API authenticates as a
+Project Admin `ClientApplication` and sends
+`X-Medplum-On-Behalf-Of: ProjectMembership/<id>` per request. Medplum then
+resolves the access policy from that membership — `fhir/accesspolicy.ts` uses
+`onBehalfOfMembership ?? realMembership` — and records the user as author and
+in `AuditEvent`. This replaces the earlier idea of Medplum trusting Sunbird
+JWTs as an external identity provider, which would have required this service
+to become an OIDC provider with a userinfo endpoint for no benefit, since no
+caller talks to Medplum directly.
+
+Two constraints from Medplum's source shape the design. On-Behalf-Of across
+Projects is refused unless the caller is a super admin, so one
+`ClientApplication` per tenant Project. And a request that omits the header
+runs with the client's Project Admin rights, so `MedplumService` must make the
+header mandatory rather than optional. **Recommendation unchanged: finish
+spike 5 before building the real module, not after.**
+
+## Spike 5 plan: Project per tenant + On-Behalf-Of
+
+Throwaway spike code on the spike branch, same as spikes 1–2. The goal is to
+prove the boundary holds and the provisioning is tractable, not to build the
+real sync.
+
+**Build**
+
+1. **Provisioning (extend `scripts/medplum-setup.js`)**: for each `core.tenants`
+   row, create a Medplum `Project`, a Project Admin `ClientApplication`, and a
+   root `Organization`; for each branch, an `Organization` `partOf` the root.
+   Super-admin credentials are used here and nowhere else. Record the Medplum
+   ids against the tenant and branch (spike: a JSON map or env file is fine;
+   real module: columns on `core.tenants`/`core.branches` plus a secret store
+   for client credentials).
+2. **Memberships**: for each `user_tenant_access` row, invite a `Practitioner`
+   into that tenant's Project (`/admin/projects/:id/invite`, `sendEmail:
+   false`), with `access` entries parameterized by the user's branches against
+   one branch-scoped `AccessPolicy` (`Patient?_compartment=%branch`, likewise
+   for `Encounter`, `Observation`, …). Store the membership id. Branch
+   assignment needs a user↔branch table; for the spike, derive it from
+   `users.default_branch_id`.
+3. **Tag patients to branches**: seed and ADT writes call `$set-accounts` on
+   the `Patient` with the branch `Organization`, so related resources inherit
+   the compartment.
+4. **`MedplumService`**: one cached client per tenant Project; the request
+   method takes the caller's membership id and refuses to send without it.
+   Add a lint rule (`no-restricted-imports` on `@medplum/core` outside
+   `src/fhir/medplum.service.ts`) so nothing else can open a raw client.
+5. **Gateway and ADT**: resolve tenant client + membership from `req.user`,
+   forward with On-Behalf-Of. Delete `src/fhir/tenant-scope.ts`, the tag
+   injection on writes, and the post-read tag checks. Keep the resource-type
+   allow-list (it still limits surface area), and add `PATIENT_MGMT_*`
+   permission checks on the gateway and ADT routes and the frontend
+   `clinical` routes.
+6. **Authorship**: check whether answering `auth/me` through the gateway
+   On-Behalf-Of the user restores `medplum.getProfile()` in the browser; if
+   not, record what the authorship-dependent components need.
+
+**Acceptance tests** (e2e against a running Medplum, two tenants, two branches
+in tenant A, one user per branch):
+
+- The five rows in [Confirmed tenant bypasses](#confirmed-tenant-bypasses),
+  rerun as tenant A: none returns, modifies, deletes, or references a tenant B
+  resource.
+- Branch scope: the Olaya-branch user sees Olaya patients only, gets 404 on a
+  Malaz patient by id, and `$graphql` returns Olaya patients only.
+- A request built without a membership id fails inside `MedplumService`
+  rather than reaching Medplum.
+- `AuditEvent` and `meta.author` on a write name the Sunbird user's
+  `Practitioner`, not the `ClientApplication`.
+- The existing admit → discharge → notification flow (spike 1) still works.
+
+**Until this lands**: no real PHI on the spike stack. If it is shown to anyone
+outside the team before then, remove `$graphql` from `ALLOWED_OPERATIONS` and
+reject type-level `PUT`/`PATCH`/`DELETE` in the gateway — this breaks some
+`@medplum/react` components, which is acceptable for a demo.
+
+**Out of scope**: the production sync between `core` and Medplum (outbox or
+synchronous provisioning, reconciliation job), mapping the full Sunbird role
+catalogue to access policies, and the `core` schema changes themselves — those
+belong to the real module, informed by what this spike shows.
 
 ## ADT pages (A01–A05)
 

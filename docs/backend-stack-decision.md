@@ -59,9 +59,27 @@ schema, different upgrade lifecycle). Two running services is unavoidable. What
   existing `/api/v1/...` routes. Medplum is an implementation detail behind this
   service, not a second API.
 - **One login**: keep Sunbird's existing JWT/cookie auth as the *only* login users
-  see. Configure Medplum to trust an external identity provider (its own auth
-  supports this) instead of running its own separate signup/login. No second
-  login screen, no two independent identities for the same human.
+  see. Every staff member also has a Medplum `ProjectMembership`, but nobody
+  ever logs in to Medplum with it. This service authenticates to Medplum as a
+  `ClientApplication` and names the real user on every call with Medplum's
+  [On-Behalf-Of](https://www.medplum.com/docs/auth/on-behalf-of) header
+  (`X-Medplum-On-Behalf-Of: ProjectMembership/<id>`), so Medplum applies *that
+  user's* `AccessPolicy` and records them as author and in `AuditEvent`. This
+  replaces the earlier plan to make Medplum trust Sunbird JWTs as an external
+  identity provider: that would require this service to become an OIDC provider
+  with a userinfo endpoint, which buys nothing when no caller talks to Medplum
+  directly. Never call Medplum as the bare service account on a user's behalf —
+  a request without the header runs with Project Admin rights.
+- **One Medplum `Project` per tenant**: Sunbird tenants are separate
+  organizations (and separate data controllers under PDPL), so they get
+  Medplum's hard isolation boundary — resources cannot reference across
+  Projects, and search, `$graphql`, `_include`, and conditional writes cannot
+  see past it. Branches are `Organization` resources inside their tenant's
+  Project and scope clinical access through compartments plus parameterized
+  `AccessPolicy` (`%branch`). A `ClientApplication` can only act on behalf of
+  members of its own Project, so each tenant Project gets its own client;
+  super-admin credentials are used only by tenant provisioning, never on the
+  request path.
 - **One frontend**: `@medplum/react` components are imported directly into the
   existing React app like any other component library — there is no separate
   frontend to stand up.
@@ -73,7 +91,18 @@ schema, different upgrade lifecycle). Two running services is unavoidable. What
   `Observation`, etc.); this service's existing `core` schema keeps owning
   tenants, staff accounts, roles/permissions, and anything that doesn't naturally
   fit the FHIR resource model. That boundary is internal wiring, not something
-  users or API callers ever see.
+  users or API callers ever see. `core` stays the source of truth and this
+  service provisions the Medplum side from it:
+
+  | `core` (source of truth) | Medplum counterpart |
+  |---|---|
+  | `tenants` | `Project` + its `ClientApplication` + a root `Organization` (store the ids and a credential reference on the tenant) |
+  | `branches` | `Organization` (`partOf` the root) used as the branch compartment |
+  | `users` | `Practitioner` profile |
+  | `user_tenant_access` | `ProjectMembership`, one-to-one — store its id here; it is the On-Behalf-Of value |
+  | user ↔ branch assignment (new table; today only `users.default_branch_id`) | `%branch` parameters on the membership's `access` entries |
+  | `roles` / `permissions` / `modules` / `groups` | Unchanged for screen/API permissions and module entitlements; clinical roles additionally map to an `AccessPolicy` |
+  | `audit_logs` | Unchanged for admin and auth events; clinical access audit is Medplum `AuditEvent` — do not double-write |
 - **Bots vs. Temporal**: use Bots for single-step reactions to FHIR data changes;
   keep Temporal (or equivalent) for genuinely multi-step, compensable care
   pathways. Bots triggering into a Temporal workflow is fine; a long chain of
@@ -91,7 +120,7 @@ surface, not just one-time integration work:
 | Redis (new dependency — not run today) | Patching/monitoring | Ongoing, low effort | Same as above — a managed Redis instance removes most of this burden more directly than automation would |
 | Bots | Write, test, deploy each automation function | Only when automation logic changes | **Yes** — drafting the function and tests is good agent work; review before deploying anything that touches PHI |
 | Medplum Agent (per hospital site) | Approve and apply remote upgrades on physical, on-prem installs | Per-site, occasional | **No** — this is a physical/change-control gate (live equipment on a hospital network, usually inside a maintenance window), not a skill or tooling gap |
-| Auth trust config | Keep NestJS-issued tokens and Medplum's trust config in sync | Rare | Partly — an agent can update code when the format changes, but someone has to notice/decide it needs to change |
+| Tenant provisioning and membership sync | Keep each tenant's Project/client, each branch's `Organization`, and each user's `ProjectMembership` (`access` entries, active/inactive) in step with `core`; run a reconciliation job to catch drift | On every tenant, branch, user-access, role, or branch-assignment change; reconciliation scheduled | **Yes** for the code; the mapping from Sunbird roles to `AccessPolicy` is a human, clinical-risk decision |
 | Monitoring / on-call | Figure out which of the two services failed and why | Ongoing | **Yes** — log correlation and failure triage across services is a good fit for agent-assisted debugging |
 
 **Bottom line**: a meaningful share of the recurring work (version bumps, Bot
@@ -118,15 +147,17 @@ patient-management/ICU modules on top of these choices:
 > Spikes 1 and 2 are done; spike 5 is half done — results in
 > [`events-spike-findings.md`](./events-spike-findings.md) and
 > [`medplum-spike-findings.md`](./medplum-spike-findings.md). The decision below
-> stands; the one thing that changed is that per-tenant `AccessPolicy` (the rest
-> of spike 5) is now a prerequisite for the real module rather than a later
-> refinement.
+> stands. What changed: the spike's application-level tenant scoping has five
+> confirmed bypasses (including cross-tenant overwrite and delete by national
+> ID), so finishing spike 5 — Project per tenant plus On-Behalf-Of — is a
+> prerequisite for real patient data, not a later refinement. Until then, no
+> real PHI on the spike stack.
 
 1. **Event-driven spike** ✅: one clinical reaction implemented twice — as a Medplum Bot on a Subscription, and as a BullMQ job on Medplum's Redis — to establish which pattern fits which class of event. No Kafka in this spike; it enters only via the revisit trigger below. Findings: [`events-spike-findings.md`](./events-spike-findings.md).
 2. **FHIR + UI spike** ✅: add Medplum's server to this repo's `docker-compose.yml`, model `Patient`, `Encounter`, and `Observation`, call it from a NestJS service via `@medplum/core` proxied under `/api/v1/...`, and build one real patient-management screen with `@medplum/react` against the existing Mantine theme — confirming both that the UI looks native and that no external caller ever needs to know Medplum exists as a separate service.
 3. **ICU real-time spike**: a WebSocket/MQTT gateway (or Medplum's `useSubscription`) simulating concurrent bedside streams at a realistic bed count and sample rate, load-tested with a deliberately CPU-heavy step included, to confirm event-loop behavior under load.
 4. **Device bridge spike**: configure a Medplum Agent endpoint for one real device type (HL7v2/MLLP or DICOM), write the minimal Bot that accepts and acknowledges it, and confirm the message-mapping effort matches expectations from the HL7-adapters discussion.
-5. **Auth-seam spike**: decide and prototype how Sunbird's existing JWT/cookie auth and Medplum's auth model relate for the same clinical-app users, before real patient data flows through both systems.
+5. **Auth-seam spike** (half done): decide and prototype how Sunbird's existing JWT/cookie auth and Medplum's auth model relate for the same clinical-app users, before real patient data flows through both systems. Decided: Project per tenant plus On-Behalf-Of (see the adoption shape above). Plan and acceptance tests: [`medplum-spike-findings.md` §Spike 5 plan](./medplum-spike-findings.md#spike-5-plan-project-per-tenant--on-behalf-of).
 6. **Workflow spike** (optional, do before patient-management workflows get complex): one care pathway modeled as FHIR `Task` transitions driven by Bots; only if compensation-on-failure is genuinely needed, repeat it as a Temporal TypeScript workflow to compare.
 
 ## Revisit triggers
@@ -152,11 +183,13 @@ The FHIR + UI spike and the event-driven (Bots + BullMQ) spike are finished
 [`events-spike-findings.md`](./events-spike-findings.md)). Remaining priority:
 
 ```text
-Finish the auth-seam spike (5) from @docs/medplum-spike-findings.md, continuing on the spike branch.
-Configure Medplum to trust Sunbird-issued JWTs as an external identity provider, with one
-Medplum identity per user and an AccessPolicy per tenant. Then move the tenant checks out of
-src/fhir/tenant-scope.ts and confirm the $graphql tenant-isolation hole is closed.
-This is the prerequisite for building the real patient-management module.
+Finish the auth-seam spike (5) per "Spike 5 plan" in @docs/medplum-spike-findings.md,
+continuing on the spike branch. One Medplum Project + ClientApplication per Sunbird tenant,
+one ProjectMembership per user_tenant_access row, branches as Organization compartments.
+MedplumService refuses to send any request without X-Medplum-On-Behalf-Of. Delete the tag-based
+scoping in src/fhir/tenant-scope.ts and the gateway's tag injection/post-read checks, then
+turn the five confirmed bypasses into e2e tests that must fail to leak.
+Prerequisite for building the real patient-management module.
 ```
 
 ```text

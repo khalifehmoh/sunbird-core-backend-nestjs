@@ -171,7 +171,7 @@
     <tr><td>Medplum Postgres schema and Redis</td><td>Ongoing, low effort</td><td>Partly — managed hosting removes more of this than automation does</td></tr>
     <tr><td>Bots (write, test, deploy)</td><td>On automation change</td><td>Yes — with human review before anything PHI-touching ships</td></tr>
     <tr><td>Medplum Agent updates, per hospital site</td><td>Occasional, per site</td><td>No — physical and change-control gate on live equipment</td></tr>
-    <tr><td>Auth trust config between NestJS and Medplum</td><td>Rare</td><td>Partly — an agent can apply it; a human has to notice it is needed</td></tr>
+    <tr><td>Tenant provisioning and membership sync (core tenants/users to Medplum Projects/ProjectMemberships)</td><td>On tenant or user change</td><td>Yes — scripted; a human reviews AccessPolicy changes</td></tr>
     <tr><td>Two-service monitoring and on-call triage</td><td>Ongoing</td><td>Yes — cross-service log correlation suits agent-assisted debugging</td></tr>
   </table>
   <p class="cap">What does not shrink with better tooling: compliance sign-off on patient-data-touching changes, and
@@ -179,8 +179,8 @@
 
   <h2>Build order</h2>
   <ol class="phases">
-    <li><b>Foundation:</b> Medplum in <code>docker-compose.yml</code>, auth seam (Sunbird JWT as the single source of
-    truth), one patient screen via <code>@medplum/react</code> proxied under <code>/api/v1</code> — validates the three
+    <li><b>Foundation:</b> Medplum in <code>docker-compose.yml</code>, auth seam (Sunbird JWT as the single login, Medplum
+    calls made On-Behalf-Of the user's ProjectMembership in the tenant's Project), one patient screen via <code>@medplum/react</code> proxied under <code>/api/v1</code> — validates the three
     riskiest seams at once.</li>
     <li><b>Patient management:</b> CRUD-heavy, lowest technical risk; exercises <code>Task</code>-based workflows and Bots.</li>
     <li><b>ICU module last:</b> highest technical risk (real-time load, alarm logic, device bridging) — lands on a proven
@@ -193,7 +193,7 @@
     <li>Add Medplum to docker-compose, proxy it under /api/v1, and build one patient screen with @medplum/react on the existing Mantine theme</li>
     <li>ICU real-time spike: realistic bed count and sample rate, with a deliberately CPU-heavy alarm step included</li>
     <li>Device bridge spike: one Medplum Agent endpoint plus the minimal Bot that acknowledges and maps a real device's messages</li>
-    <li>Auth seam: make Sunbird's existing JWT the single source of truth and have Medplum trust it — before real patient data flows</li>
+    <li>Tenancy and auth seam: one Medplum Project per tenant, branches as Organization compartments, and every gateway call made On-Behalf-Of the user's ProjectMembership — before real patient data flows</li>
     <li>Workflow spike: one care pathway as FHIR Task transitions driven by Bots; only repeat it in Temporal if compensation-on-failure is genuinely needed</li>
   </ul>
 
