@@ -144,20 +144,22 @@ of all the same categories of ongoing work above.
 Run these as short, throwaway spikes, not production code, before building the real
 patient-management/ICU modules on top of these choices:
 
-> Spikes 1 and 2 are done; spike 5 is half done — results in
+> Spikes 1, 2 and 5 are done — results in
 > [`events-spike-findings.md`](./events-spike-findings.md) and
 > [`medplum-spike-findings.md`](./medplum-spike-findings.md). The decision below
-> stands. What changed: the spike's application-level tenant scoping has five
-> confirmed bypasses (including cross-tenant overwrite and delete by national
-> ID), so finishing spike 5 — Project per tenant plus On-Behalf-Of — is a
-> prerequisite for real patient data, not a later refinement. Until then, no
-> real PHI on the spike stack.
+> stands. What changed: the spike's first, application-level tenant scoping had
+> five confirmed bypasses (including cross-tenant overwrite and delete by
+> national ID). Spike 5 — Project per tenant plus On-Behalf-Of — replaced it and
+> closes all five (36 of 36 acceptance checks). Remaining before real patient
+> data: write-reference checks stay in our gateway (Medplum does not enforce
+> them), `getProfile()` and `AuditEvent` are unresolved, and the role-to-policy
+> catalogue and `core`-to-Medplum sync are not built.
 
 1. **Event-driven spike** ✅: one clinical reaction implemented twice — as a Medplum Bot on a Subscription, and as a BullMQ job on Medplum's Redis — to establish which pattern fits which class of event. No Kafka in this spike; it enters only via the revisit trigger below. Findings: [`events-spike-findings.md`](./events-spike-findings.md).
 2. **FHIR + UI spike** ✅: add Medplum's server to this repo's `docker-compose.yml`, model `Patient`, `Encounter`, and `Observation`, call it from a NestJS service via `@medplum/core` proxied under `/api/v1/...`, and build one real patient-management screen with `@medplum/react` against the existing Mantine theme — confirming both that the UI looks native and that no external caller ever needs to know Medplum exists as a separate service.
 3. **ICU real-time spike**: a WebSocket/MQTT gateway (or Medplum's `useSubscription`) simulating concurrent bedside streams at a realistic bed count and sample rate, load-tested with a deliberately CPU-heavy step included, to confirm event-loop behavior under load.
 4. **Device bridge spike**: configure a Medplum Agent endpoint for one real device type (HL7v2/MLLP or DICOM), write the minimal Bot that accepts and acknowledges it, and confirm the message-mapping effort matches expectations from the HL7-adapters discussion.
-5. **Auth-seam spike** (half done): decide and prototype how Sunbird's existing JWT/cookie auth and Medplum's auth model relate for the same clinical-app users, before real patient data flows through both systems. Decided: Project per tenant plus On-Behalf-Of (see the adoption shape above). Plan and acceptance tests: [`medplum-spike-findings.md` §Spike 5 plan](./medplum-spike-findings.md#spike-5-plan-project-per-tenant--on-behalf-of).
+5. **Auth-seam spike** ✅ (with open items): decide and prototype how Sunbird's existing JWT/cookie auth and Medplum's auth model relate for the same clinical-app users, before real patient data flows through both systems. Decided: Project per tenant plus On-Behalf-Of (see the adoption shape above). Results and corrections to the plan: [`medplum-spike-findings.md` §Spike 5 results](./medplum-spike-findings.md#spike-5-results).
 6. **Workflow spike** (optional, do before patient-management workflows get complex): one care pathway modeled as FHIR `Task` transitions driven by Bots; only if compensation-on-failure is genuinely needed, repeat it as a Temporal TypeScript workflow to compare.
 
 ## Revisit triggers

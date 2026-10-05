@@ -5,7 +5,8 @@ Results of the de-risking spikes in
 Spike code, kept on a branch to read and then delete — it is not the real
 patient-management module.
 
-**Ran**: spike 2 (FHIR + UI) in full, spike 5 (auth seam) partially.
+**Ran**: spike 2 (FHIR + UI) in full, spike 5 (auth seam: Project per tenant +
+On-Behalf-Of) in full — see [Spike 5 results](#spike-5-results).
 **Did not run**: spike 4 (device bridge). Nothing here says anything about
 HL7v2/MLLP, DICOM, or the Medplum Agent; that question is still open.
 
@@ -26,11 +27,11 @@ boundary between Medplum's authorization model and this service's:
    overwrite and delete through conditional writes (see
    [Confirmed tenant bypasses](#confirmed-tenant-bypasses)).
 
-Neither is a blocker for the spike. Both need to be closed before real patient
-data flows, and the fix for both is the same: put the tenant boundary inside
-Medplum — one `Project` per tenant, with this service calling On-Behalf-Of the
-real user — which is exactly the part of spike 5 that was not prototyped. See
-[Spike 5 plan](#spike-5-plan-project-per-tenant--on-behalf-of).
+Neither was a blocker for the spike. The fix for both was the same: put the
+tenant boundary inside Medplum — one `Project` per tenant, with this service
+calling On-Behalf-Of the real user. That is now built and passes its acceptance
+checks; see [Spike 5 results](#spike-5-results). The bypass table below
+describes the earlier application-level design.
 
 ## What was built
 
@@ -38,9 +39,10 @@ real user — which is exactly the part of spike 5 that was not prototyped. See
 |---|---|
 | Medplum server + its own Postgres/Redis | `docker-compose.yml`, ports 8103/5433, separate volumes |
 | One-command setup and demo data | `scripts/medplum-setup.js`, `npm run medplum:{up,provision,seed,down}` |
-| Medplum client (client credentials, auto token refresh) | `src/fhir/medplum.service.ts` |
+| Per-tenant Medplum clients, every call On-Behalf-Of a membership | `src/fhir/medplum.service.ts`, `medplum-registry.ts`, `medplum-actor.ts` |
 | FHIR gateway under `/api/v1/fhir/R4` | `src/fhir/fhir-gateway.controller.ts` |
-| Tenant scoping rules, as pure functions | `src/fhir/tenant-scope.ts` (+ spec) |
+| Reference-integrity check for writes | `src/fhir/references.ts` (+ spec) |
+| `PATIENT_MGMT_*` permission checks | `src/auth/permissions.ts`, `permissions.guard.ts` |
 | ADT workflows (A01–A05) | `src/fhir/adt.{controller,service,mapper}.ts` |
 | Patient list and detail screens | `sunbird-frontend/src/pages/clinical/`, `src/medplum/` |
 
@@ -172,7 +174,74 @@ runs with the client's Project Admin rights, so `MedplumService` must make the
 header mandatory rather than optional. **Recommendation unchanged: finish
 spike 5 before building the real module, not after.**
 
+## Spike 5 results
+
+Implemented on branch `cursor/spike5-project-per-tenant-on-behalf-of-a932`, run
+against Medplum 5.2.1 (self-hosted, Postgres 16, Redis) with three tenants,
+two branches in tenant A and one user per role. Reproduce with
+`npm run medplum:up && npm run medplum:seed`, then
+`SPIKE_TEST_PASSWORD=... npm run medplum:check`. **36 of 36 acceptance checks
+pass**, including the five bypasses from
+[Confirmed tenant bypasses](#confirmed-tenant-bypasses) (the old
+`tenant-scope.ts` and its tag injection are deleted).
+
+**What now enforces the boundary**
+
+- One Medplum `Project` per tenant, one Project Admin `ClientApplication` per
+  Project, branches as `Organization` resources `partOf` the tenant root.
+  Provisioning is idempotent and derives every id from the Sunbird id
+  (`scripts/lib/medplum-admin.js`); the per-tenant client credentials and the
+  user-to-membership map live in `.medplum/tenants.json` (mode 0600, gitignored).
+- Every FHIR, ADT and events call carries
+  `X-Medplum-On-Behalf-Of: ProjectMembership/<id>`. `MedplumService` has no
+  method that can send without an actor, and `no-restricted-imports` blocks
+  runtime imports of `@medplum/core` outside `src/fhir/medplum.service.ts` so
+  nothing else can open a raw client.
+- Branch scope is a parameterized `AccessPolicy`: `compartment: %branch` on the
+  policy stamps the branch onto everything the member creates, and the criteria
+  `Type?_compartment=%branch` filters every read, search, `_include`, `$graphql`
+  and `$everything` at the SQL level.
+- `PATIENT_MGMT_*` codes are checked on the gateway, the ADT routes and the
+  events routes. Platform admins keep their bypass; `TENANT_ADMIN` does not.
+
+**Where the plan was wrong, and what was done instead**
+
+| Plan said | What the spike found |
+|---|---|
+| Tag patients to branches with `$set-accounts` | `$set-accounts` needs Project Admin, which On-Behalf-Of users do not have. The parameterized policy's `compartment` does the stamping on write instead, with no extra call. |
+| Create users with `/admin/projects/:id/invite` | Also needs project admin. Users are created by provisioning as `User` (project-scoped, `externalId`, no email, no password) + `Practitioner` + `ProjectMembership` with deterministic ids. With no password and no email there is no login or reset path to the identity. |
+| A request without the header fails | In Medplum an empty or missing header is not an error: the call runs with the client's Project Admin rights. `MedplumService` therefore makes the actor mandatory and the registry fails closed for unknown users. A bogus or cross-Project membership id is a 400 from Medplum. |
+| Deactivate a membership when a user leaves | Medplum keeps honouring an inactive membership for On-Behalf-Of. Provisioning deletes the membership and the registry drops the user. |
+| Medplum enforces reference rules | It does not check that a write's references are readable by the writer: `POST Observation` with `subject: Patient/<other tenant or branch>` is accepted. This is the one hole the boundary does not close by itself, so the gateway runs a reference check on writes (`references.ts`); the acceptance check covers cross-tenant `Observation` and cross-branch `Encounter`. |
+| `auth/me` On-Behalf-Of may restore `getProfile()` | It does not: Medplum answers with the `ClientApplication`. Authorship-dependent components (timeline comments, signatures) still need the frontend to be given the user's `Practitioner` some other way. Left open. |
+| `AuditEvent` names the user | `AuditEvent` is off by default in Medplum and was not enabled. Authorship is on the resource instead: `meta.onBehalfOf` is the user's `Practitioner`, `meta.author` is the `ClientApplication`. |
+
+**Other observations**
+
+- `$everything` on an invisible id and on a nonexistent id both answer 403, so
+  there is no existence oracle across tenants.
+- Branch isolation does not extend to resources written by the automation
+  identity. The event notifications are written without a branch, so they are
+  read by first reading the Encounter as the caller (404 if it is not in their
+  branch) and then reading the Communication as the tenant's `system` member.
+- Event Bots and Subscriptions are Project configuration, which On-Behalf-Of
+  users cannot write, so `npm run medplum:events` creates a Bot and two
+  Subscriptions in every tenant Project and tags the webhook with
+  `?tenantId=` so the BullMQ worker acts inside the right Project. A native
+  (non-Docker) Medplum needs `"allowUnsafeOutbound": true` in its config file,
+  not an environment variable, before it will POST to localhost.
+- The admit, transfer and discharge flow and both notification paths (Bot and
+  BullMQ) still work end to end per tenant.
+
+**Still open**: tenant-wide roles beyond the single branch (a user with no
+valid default branch gets no clinical access rather than tenant-wide access),
+the role-to-policy catalogue, enabling `AuditEvent`, `getProfile()`, frontend
+`clinical` route gating, and the production sync between `core` and Medplum.
+
 ## Spike 5 plan: Project per tenant + On-Behalf-Of
+
+> Historical: this is the plan as written before the spike. Where the
+> implementation differs, [Spike 5 results](#spike-5-results) is authoritative.
 
 Throwaway spike code on the spike branch, same as spikes 1–2. The goal is to
 prove the boundary holds and the provisioning is tractable, not to build the
