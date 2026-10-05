@@ -32,4 +32,26 @@ export default tseslint.config(
       "prettier/prettier": ["error", { endOfLine: "auto" }],
     },
   },
+  {
+    // Medplum treats a request without a delegated identity as the service
+    // client itself, which is a Project Admin. Opening a client anywhere but
+    // MedplumService would bypass the tenant and branch boundary.
+    files: ['src/**/*.ts'],
+    ignores: ['src/fhir/medplum.service.ts', '**/*.spec.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: '@medplum/core',
+              allowTypeImports: true,
+              message:
+                'Obtain a Medplum client from MedplumService.getClient(actor) so every call is made on behalf of a user.',
+            },
+          ],
+        },
+      ],
+    },
+  },
 );

@@ -2,13 +2,13 @@ import {
   BadRequestException,
   Body,
   Controller,
-  ForbiddenException,
   Get,
   HttpCode,
   HttpStatus,
   Param,
   Post,
   Req,
+  UseGuards,
 } from '@nestjs/common';
 import {
   ApiCookieAuth,
@@ -17,8 +17,12 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import type { Request } from 'express';
+import { PermissionsGuard } from '../auth/permissions.guard';
+import { RequirePermissions } from '../auth/require-permissions.decorator';
 import { User } from '../database/entities/user.entity';
 import { AdtService } from './adt.service';
+import { PATIENT_MGMT_PERMISSIONS } from './fhir.constants';
+import { actorOf } from './medplum-actor';
 import {
   AdmitRequestDto,
   BedBoardResponseDto,
@@ -39,57 +43,64 @@ type AuthenticatedRequest = Request & { user: User };
 @ApiTags('adt')
 @ApiCookieAuth('cookieAuth')
 @Controller('adt')
+@UseGuards(PermissionsGuard)
 export class AdtController {
   constructor(private readonly adtService: AdtService) {}
 
   @Post('admit')
+  @RequirePermissions(PATIENT_MGMT_PERMISSIONS.create)
   @ApiCreatedResponse({ type: EncounterResponseDto })
   admit(
     @Req() req: AuthenticatedRequest,
     @Body() body: AdmitRequestDto,
   ): Promise<EncounterResponseDto> {
-    return this.adtService.admit(body, this.tenantId(req));
+    return this.adtService.admit(body, actorOf(req.user));
   }
 
   @Post('register')
+  @RequirePermissions(PATIENT_MGMT_PERMISSIONS.create)
   @ApiCreatedResponse({ type: EncounterResponseDto })
   register(
     @Req() req: AuthenticatedRequest,
     @Body() body: RegisterVisitRequestDto,
   ): Promise<EncounterResponseDto> {
-    return this.adtService.register(body, this.tenantId(req));
+    return this.adtService.register(body, actorOf(req.user));
   }
 
   @Post('transfer')
+  @RequirePermissions(PATIENT_MGMT_PERMISSIONS.update)
   @HttpCode(HttpStatus.OK)
   @ApiOkResponse({ type: EncounterResponseDto })
   transfer(
     @Req() req: AuthenticatedRequest,
     @Body() body: TransferRequestDto,
   ): Promise<EncounterResponseDto> {
-    return this.adtService.transfer(body, this.tenantId(req));
+    return this.adtService.transfer(body, actorOf(req.user));
   }
 
   @Post('discharge')
+  @RequirePermissions(PATIENT_MGMT_PERMISSIONS.update)
   @HttpCode(HttpStatus.OK)
   @ApiOkResponse({ type: EncounterResponseDto })
   discharge(
     @Req() req: AuthenticatedRequest,
     @Body() body: DischargeRequestDto,
   ): Promise<EncounterResponseDto> {
-    return this.adtService.discharge(body, this.tenantId(req));
+    return this.adtService.discharge(body, actorOf(req.user));
   }
 
   @Post('preadmit')
+  @RequirePermissions(PATIENT_MGMT_PERMISSIONS.create)
   @ApiCreatedResponse({ type: EncounterResponseDto })
   preadmit(
     @Req() req: AuthenticatedRequest,
     @Body() body: PreadmitRequestDto,
   ): Promise<EncounterResponseDto> {
-    return this.adtService.preadmit(body, this.tenantId(req));
+    return this.adtService.preadmit(body, actorOf(req.user));
   }
 
   @Post('preadmit/:id/admit')
+  @RequirePermissions(PATIENT_MGMT_PERMISSIONS.create)
   @ApiOkResponse({ type: EncounterResponseDto })
   convertPreadmit(
     @Req() req: AuthenticatedRequest,
@@ -99,11 +110,12 @@ export class AdtController {
     return this.adtService.convertPreadmitToAdmit(
       this.validateUuid(id),
       body,
-      this.tenantId(req),
+      actorOf(req.user),
     );
   }
 
   @Get('encounters/:id')
+  @RequirePermissions(PATIENT_MGMT_PERMISSIONS.read)
   @ApiOkResponse({ type: EncounterResponseDto })
   getEncounter(
     @Req() req: AuthenticatedRequest,
@@ -111,22 +123,15 @@ export class AdtController {
   ): Promise<EncounterResponseDto> {
     return this.adtService.getEncounter(
       this.validateUuid(id),
-      this.tenantId(req),
+      actorOf(req.user),
     );
   }
 
   @Get('beds')
+  @RequirePermissions(PATIENT_MGMT_PERMISSIONS.read)
   @ApiOkResponse({ type: BedBoardResponseDto })
   bedBoard(@Req() req: AuthenticatedRequest): Promise<BedBoardResponseDto> {
-    return this.adtService.bedBoard(this.tenantId(req));
-  }
-
-  private tenantId(req: AuthenticatedRequest): string {
-    const tenantId = req.user?.tenant?.tenantId;
-    if (!tenantId) {
-      throw new ForbiddenException('User is not associated with a tenant');
-    }
-    return tenantId;
+    return this.adtService.bedBoard(actorOf(req.user));
   }
 
   private validateUuid(id: string, name = 'id'): string {

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { AdtController } from './adt.controller';
 import { AdtService } from './adt.service';
 import { FhirGatewayController } from './fhir-gateway.controller';
+import { MedplumRegistry } from './medplum-registry';
 import { MedplumService } from './medplum.service';
 
 /**
@@ -13,7 +14,7 @@ import { MedplumService } from './medplum.service';
  */
 @Module({
   controllers: [FhirGatewayController, AdtController],
-  providers: [MedplumService, AdtService],
-  exports: [MedplumService],
+  providers: [MedplumRegistry, MedplumService, AdtService],
+  exports: [MedplumRegistry, MedplumService],
 })
 export class FhirModule {}

@@ -1,6 +1,7 @@
 import {
   Injectable,
   Logger,
+  NotFoundException,
   OnModuleDestroy,
   OnModuleInit,
   ServiceUnavailableException,
@@ -13,7 +14,7 @@ import {
   EVENT_PATH_SYSTEM,
 } from '../fhir/fhir.constants';
 import { MedplumService } from '../fhir/medplum.service';
-import { applyTenantTag, tenantTagSearchValue } from '../fhir/tenant-scope';
+import { systemActor, type MedplumActor } from '../fhir/medplum-actor';
 import {
   buildDischargeCommunication,
   buildDemoSms,
@@ -87,7 +88,10 @@ export class EventsService implements OnModuleInit, OnModuleDestroy {
     await this.queue?.close();
   }
 
-  async enqueueFromEncounter(encounter: Encounter): Promise<{ jobId: string }> {
+  async enqueueFromEncounter(
+    encounter: Encounter,
+    tenantId: string,
+  ): Promise<{ jobId: string }> {
     if (!this.enabled || !this.queue) {
       throw new ServiceUnavailableException(
         'Events spike disabled. Set EVENTS_ENABLED=true.',
@@ -108,9 +112,7 @@ export class EventsService implements OnModuleInit, OnModuleDestroy {
         visitDisplay: encounter.identifier?.find((id) =>
           id.system?.includes('visit-number'),
         )?.value,
-        tenantTag: encounter.meta?.tag?.find((t) =>
-          t.system?.includes('tenant-id'),
-        )?.code,
+        tenantId,
       },
       {
         jobId: `discharge-${encounter.id}-bullmq`,
@@ -125,19 +127,28 @@ export class EventsService implements OnModuleInit, OnModuleDestroy {
 
   async listNotifications(
     encounterId: string,
-    tenantId: string,
+    actor: MedplumActor,
   ): Promise<Communication[]> {
+    // The caller must be able to see the Encounter (their branch, their
+    // permissions). The notifications are written by the system member and so
+    // carry no branch; they are only reachable through that Encounter.
+    try {
+      await this.medplum
+        .getClient(actor)
+        .readResource('Encounter', encounterId);
+    } catch {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
+
     // Communication has no standard `about` search param in Medplum; look up
     // the two deterministic identifiers the bot/BullMQ writers stamp.
-    const client = await this.medplum.getClient();
-    const tenantTag = tenantTagSearchValue(tenantId);
+    const client = this.medplum.getClient(systemActor(actor.tenantId));
     const paths: Array<'bot' | 'bullmq'> = ['bot', 'bullmq'];
     const found: Communication[] = [];
     for (const path of paths) {
       const bundle = await client.search(
         'Communication',
         new URLSearchParams({
-          _tag: tenantTag,
           identifier: `${EVENT_NOTIFICATION_SYSTEM}|discharge-${encounterId}-${path}`,
           _count: '1',
         }).toString(),
@@ -184,7 +195,7 @@ export class EventsService implements OnModuleInit, OnModuleDestroy {
    */
   async *watchNotifications(
     encounterId: string,
-    tenantId: string,
+    actor: MedplumActor,
     timeoutMs = 15_000,
   ): AsyncGenerator<{
     encounterId: string;
@@ -224,10 +235,7 @@ export class EventsService implements OnModuleInit, OnModuleDestroy {
     let emittedBullmq = false;
 
     while (Date.now() < deadline) {
-      const communications = await this.listNotifications(
-        encounterId,
-        tenantId,
-      );
+      const communications = await this.listNotifications(encounterId, actor);
       const summary = this.summarizePaths(communications);
       const key = `${summary.bot}:${summary.bullmq}:${summary.items
         .map((i) => i.id)
@@ -273,7 +281,7 @@ export class EventsService implements OnModuleInit, OnModuleDestroy {
       await new Promise((resolve) => setTimeout(resolve, pollMs));
     }
 
-    const communications = await this.listNotifications(encounterId, tenantId);
+    const communications = await this.listNotifications(encounterId, actor);
     const summary = this.summarizePaths(communications);
     yield {
       encounterId,
@@ -285,7 +293,7 @@ export class EventsService implements OnModuleInit, OnModuleDestroy {
   private async processDischarge(
     job: Job<DischargeNotificationJob>,
   ): Promise<void> {
-    const client = await this.medplum.getClient();
+    const client = this.medplum.getClient(systemActor(job.data.tenantId));
     const encounter = await client.readResource(
       'Encounter',
       job.data.encounterId,
@@ -332,10 +340,7 @@ export class EventsService implements OnModuleInit, OnModuleDestroy {
       'bullmq',
       demoSms,
     );
-    const tenantId = job.data.tenantTag;
-    const created = await client.createResource(
-      tenantId ? applyTenantTag(communication, tenantId) : communication,
-    );
+    const created = await client.createResource(communication);
     this.logger.log(
       `BullMQ wrote Communication/${created.id} for Encounter/${encounter.id}`,
     );

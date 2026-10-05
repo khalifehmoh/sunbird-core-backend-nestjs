@@ -134,4 +134,7 @@ export class User {
 
   /** Populated from JWT / user_roles; not a users-table column. */
   role?: string | null;
+
+  /** Populated from the JWT `permissions` claim; not a users-table column. */
+  permissions?: string[];
 }

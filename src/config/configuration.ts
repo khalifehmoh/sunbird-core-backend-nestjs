@@ -30,9 +30,7 @@ export const configuration = () => ({
   medplum: {
     enabled: process.env.MEDPLUM_ENABLED === 'true',
     baseUrl: process.env.MEDPLUM_BASE_URL ?? 'http://localhost:8103/',
-    clientId: process.env.MEDPLUM_CLIENT_ID,
-    clientSecret: process.env.MEDPLUM_CLIENT_SECRET,
-    projectId: process.env.MEDPLUM_PROJECT_ID,
+    tenantsFile: process.env.MEDPLUM_TENANTS_FILE ?? '.medplum/tenants.json',
   },
   events: {
     enabled: process.env.EVENTS_ENABLED === 'true',
@@ -83,23 +81,9 @@ export const environmentSchema = Joi.object({
   ),
   MEDPLUM_ENABLED: Joi.boolean().default(false),
   MEDPLUM_BASE_URL: Joi.string().uri().default('http://localhost:8103/'),
-  // Required together only when the FHIR gateway is switched on, so the
-  // existing dev setup keeps working without any Medplum config present.
-  MEDPLUM_CLIENT_ID: Joi.string().uuid().when('MEDPLUM_ENABLED', {
-    is: true,
-    then: Joi.required(),
-    otherwise: Joi.optional(),
-  }),
-  MEDPLUM_CLIENT_SECRET: Joi.string().when('MEDPLUM_ENABLED', {
-    is: true,
-    then: Joi.required(),
-    otherwise: Joi.optional(),
-  }),
-  MEDPLUM_PROJECT_ID: Joi.string().uuid().when('MEDPLUM_ENABLED', {
-    is: true,
-    then: Joi.required(),
-    otherwise: Joi.optional(),
-  }),
+  // Written by `npm run medplum:provision`: one Project and service client per
+  // tenant, plus each user's ProjectMembership. Read-only for the API.
+  MEDPLUM_TENANTS_FILE: Joi.string().default('.medplum/tenants.json'),
   EVENTS_ENABLED: Joi.boolean().default(false),
   EVENTS_SUBSCRIPTION_SECRET: Joi.string().min(16).when('EVENTS_ENABLED', {
     is: true,

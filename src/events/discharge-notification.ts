@@ -15,7 +15,7 @@ export type DischargeNotificationJob = {
   encounterId: string;
   patientRef?: string;
   visitDisplay?: string;
-  tenantTag?: string;
+  tenantId: string;
 };
 
 export type DemoSms = {
@@ -38,13 +38,12 @@ export function resolveDemoSmsPhone(patient?: Patient): string {
   return fromPatient?.trim() || DEMO_FALLBACK_PHONE;
 }
 
-export function buildDemoSms(
-  encounter: Encounter,
-  phone: string,
-): DemoSms {
+export function buildDemoSms(encounter: Encounter, phone: string): DemoSms {
   const visit =
     encounter.identifier?.find((id) => id.system?.includes('visit-number'))
-      ?.value ?? encounter.id ?? 'unknown';
+      ?.value ??
+    encounter.id ??
+    'unknown';
   return {
     provider: 'demo',
     to: phone,
@@ -143,8 +142,5 @@ export function buildDischargeCommunication(
     about: [{ reference: `Encounter/${encounterId}` }],
     sent: demoSms?.sentAt ?? new Date().toISOString(),
     payload,
-    meta: encounter.meta?.tag
-      ? { tag: encounter.meta.tag.filter((t) => t.system?.includes('tenant')) }
-      : undefined,
   };
 }

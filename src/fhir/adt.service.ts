@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  HttpException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -32,12 +33,9 @@ import type {
   RegisterVisitRequestDto,
   TransferRequestDto,
 } from './dto/adt.dto';
+import { systemActor, type MedplumActor } from './medplum-actor';
+import { MedplumRegistry } from './medplum-registry';
 import { MedplumService } from './medplum.service';
-import {
-  applyTenantTag,
-  belongsToTenant,
-  tenantTagSearchValue,
-} from './tenant-scope';
 
 /**
  * ADT workflows as FHIR Encounter / Location transitions.
@@ -48,24 +46,27 @@ import {
  */
 @Injectable()
 export class AdtService {
-  constructor(private readonly medplum: MedplumService) {}
+  constructor(
+    private readonly medplum: MedplumService,
+    private readonly registry: MedplumRegistry,
+  ) {}
 
   async admit(
     dto: AdmitRequestDto,
-    tenantId: string,
+    actor: MedplumActor,
   ): Promise<EncounterResponseDto> {
-    await this.readPatient(dto.patientId, tenantId);
-    await this.assertNoActiveInpatient(dto.patientId, tenantId);
-    const bed = await this.readBed(dto.bedLocationId, tenantId);
-    await this.assertBedFree(bed, tenantId);
+    await this.readPatient(dto.patientId, actor);
+    await this.assertNoActiveInpatient(dto.patientId, actor);
+    const bed = await this.readBed(dto.bedLocationId, actor);
+    await this.assertBedFree(bed, actor);
 
     if (dto.attendingPractitionerId) {
-      await this.readPractitioner(dto.attendingPractitionerId, tenantId);
+      await this.readPractitioner(dto.attendingPractitionerId, actor);
     }
 
     const visitNumber =
-      dto.visitNumber ?? (await this.nextVisitNumber(tenantId, 'IP'));
-    const organization = await this.findTenantOrganization(tenantId);
+      dto.visitNumber ?? (await this.nextVisitNumber(actor, 'IP'));
+    const organization = await this.findServiceProvider(actor);
     const encounter = toAdmitEncounter(
       dto,
       visitNumber,
@@ -73,32 +74,30 @@ export class AdtService {
       organization,
     );
 
-    const client = await this.medplum.getClient();
-    const created = await client.createResource(
-      applyTenantTag(encounter, tenantId),
-    );
-    await this.setBedOccupancy(bed, true, tenantId);
+    const client = this.medplum.getClient(actor);
+    const created = await client.createResource(encounter);
+    await this.setBedOccupancy(bed, true, actor);
     return toEncounterResponse(created);
   }
 
   async register(
     dto: RegisterVisitRequestDto,
-    tenantId: string,
+    actor: MedplumActor,
   ): Promise<EncounterResponseDto> {
-    await this.readPatient(dto.patientId, tenantId);
+    await this.readPatient(dto.patientId, actor);
     let locationDisplay: string | undefined;
     if (dto.locationId) {
-      const location = await this.readLocation(dto.locationId, tenantId);
+      const location = await this.readLocation(dto.locationId, actor);
       locationDisplay = location.name ?? location.id;
     }
     if (dto.attendingPractitionerId) {
-      await this.readPractitioner(dto.attendingPractitionerId, tenantId);
+      await this.readPractitioner(dto.attendingPractitionerId, actor);
     }
 
     const prefix = dto.patientClass === 'EMER' ? 'ED' : 'OP';
     const visitNumber =
-      dto.visitNumber ?? (await this.nextVisitNumber(tenantId, prefix));
-    const organization = await this.findTenantOrganization(tenantId);
+      dto.visitNumber ?? (await this.nextVisitNumber(actor, prefix));
+    const organization = await this.findServiceProvider(actor);
     const encounter = toRegisterEncounter(
       dto,
       visitNumber,
@@ -106,29 +105,27 @@ export class AdtService {
       organization,
     );
 
-    const client = await this.medplum.getClient();
-    const created = await client.createResource(
-      applyTenantTag(encounter, tenantId),
-    );
+    const client = this.medplum.getClient(actor);
+    const created = await client.createResource(encounter);
     return toEncounterResponse(created);
   }
 
   async transfer(
     dto: TransferRequestDto,
-    tenantId: string,
+    actor: MedplumActor,
   ): Promise<EncounterResponseDto> {
-    const encounter = await this.readEncounter(dto.encounterId, tenantId);
+    const encounter = await this.readEncounter(dto.encounterId, actor);
     if (encounter.status !== 'in-progress' || encounter.class?.code !== 'IMP') {
       throw new BadRequestException(
         'Only an active inpatient encounter can be transferred',
       );
     }
 
-    const bed = await this.readBed(dto.bedLocationId, tenantId);
-    await this.assertBedFree(bed, tenantId, encounter.id);
+    const bed = await this.readBed(dto.bedLocationId, actor);
+    await this.assertBedFree(bed, actor, encounter.id);
 
     if (dto.attendingPractitionerId) {
-      await this.readPractitioner(dto.attendingPractitionerId, tenantId);
+      await this.readPractitioner(dto.attendingPractitionerId, actor);
     }
 
     const previousBedId = this.activeLocationId(encounter);
@@ -138,24 +135,22 @@ export class AdtService {
       bed.name ?? bed.id ?? dto.bedLocationId,
     );
 
-    const client = await this.medplum.getClient();
-    const saved = await client.updateResource(
-      applyTenantTag(updated, tenantId),
-    );
+    const client = this.medplum.getClient(actor);
+    const saved = await client.updateResource(updated);
 
     if (previousBedId && previousBedId !== dto.bedLocationId) {
-      const previous = await this.readLocation(previousBedId, tenantId);
-      await this.setBedOccupancy(previous, false, tenantId);
+      const previous = await this.readLocation(previousBedId, actor);
+      await this.setBedOccupancy(previous, false, actor);
     }
-    await this.setBedOccupancy(bed, true, tenantId);
+    await this.setBedOccupancy(bed, true, actor);
     return toEncounterResponse(saved);
   }
 
   async discharge(
     dto: DischargeRequestDto,
-    tenantId: string,
+    actor: MedplumActor,
   ): Promise<EncounterResponseDto> {
-    const encounter = await this.readEncounter(dto.encounterId, tenantId);
+    const encounter = await this.readEncounter(dto.encounterId, actor);
     if (encounter.status === 'finished' || encounter.status === 'cancelled') {
       throw new BadRequestException('Encounter is already closed');
     }
@@ -166,20 +161,18 @@ export class AdtService {
     }
 
     if (dto.attendingPractitionerId) {
-      await this.readPractitioner(dto.attendingPractitionerId, tenantId);
+      await this.readPractitioner(dto.attendingPractitionerId, actor);
     }
 
     const bedId = this.activeLocationId(encounter);
     const updated = applyDischarge(encounter, dto);
-    const client = await this.medplum.getClient();
-    const saved = await client.updateResource(
-      applyTenantTag(updated, tenantId),
-    );
+    const client = this.medplum.getClient(actor);
+    const saved = await client.updateResource(updated);
 
     if (bedId) {
-      const bed = await this.readLocation(bedId, tenantId);
+      const bed = await this.readLocation(bedId, actor);
       if (this.isBed(bed)) {
-        await this.setBedOccupancy(bed, false, tenantId);
+        await this.setBedOccupancy(bed, false, actor);
       }
     }
     return toEncounterResponse(saved);
@@ -187,21 +180,21 @@ export class AdtService {
 
   async preadmit(
     dto: PreadmitRequestDto,
-    tenantId: string,
+    actor: MedplumActor,
   ): Promise<EncounterResponseDto> {
-    await this.readPatient(dto.patientId, tenantId);
+    await this.readPatient(dto.patientId, actor);
     let wardDisplay: string | undefined;
     if (dto.wardLocationId) {
-      const ward = await this.readLocation(dto.wardLocationId, tenantId);
+      const ward = await this.readLocation(dto.wardLocationId, actor);
       wardDisplay = ward.name ?? ward.id;
     }
     if (dto.attendingPractitionerId) {
-      await this.readPractitioner(dto.attendingPractitionerId, tenantId);
+      await this.readPractitioner(dto.attendingPractitionerId, actor);
     }
 
     const visitNumber =
-      dto.visitNumber ?? (await this.nextVisitNumber(tenantId, 'PA'));
-    const organization = await this.findTenantOrganization(tenantId);
+      dto.visitNumber ?? (await this.nextVisitNumber(actor, 'PA'));
+    const organization = await this.findServiceProvider(actor);
     const encounter = toPreadmitEncounter(
       dto,
       visitNumber,
@@ -209,19 +202,17 @@ export class AdtService {
       organization,
     );
 
-    const client = await this.medplum.getClient();
-    const created = await client.createResource(
-      applyTenantTag(encounter, tenantId),
-    );
+    const client = this.medplum.getClient(actor);
+    const created = await client.createResource(encounter);
     return toEncounterResponse(created);
   }
 
   async convertPreadmitToAdmit(
     encounterId: string,
     dto: Omit<AdmitRequestDto, 'patientId'>,
-    tenantId: string,
+    actor: MedplumActor,
   ): Promise<EncounterResponseDto> {
-    const planned = await this.readEncounter(encounterId, tenantId);
+    const planned = await this.readEncounter(encounterId, actor);
     if (planned.status !== 'planned' || planned.class?.code !== 'IMP') {
       throw new BadRequestException(
         'Only a planned inpatient pre-admission can convert to A01',
@@ -232,27 +223,24 @@ export class AdtService {
       throw new BadRequestException('Pre-admission has no patient');
     }
 
-    const admitted = await this.admit({ ...dto, patientId }, tenantId);
-    const client = await this.medplum.getClient();
-    await client.updateResource(
-      applyTenantTag({ ...planned, status: 'cancelled' as const }, tenantId),
-    );
+    const admitted = await this.admit({ ...dto, patientId }, actor);
+    const client = this.medplum.getClient(actor);
+    await client.updateResource({ ...planned, status: 'cancelled' as const });
     return admitted;
   }
 
   async getEncounter(
     id: string,
-    tenantId: string,
+    actor: MedplumActor,
   ): Promise<EncounterResponseDto> {
-    return toEncounterResponse(await this.readEncounter(id, tenantId));
+    return toEncounterResponse(await this.readEncounter(id, actor));
   }
 
-  async bedBoard(tenantId: string): Promise<BedBoardResponseDto> {
-    const client = await this.medplum.getClient();
+  async bedBoard(actor: MedplumActor): Promise<BedBoardResponseDto> {
+    const client = this.medplum.getClient(actor);
     const bundle = await client.search(
       'Location',
       new URLSearchParams({
-        _tag: tenantTagSearchValue(tenantId),
         _count: '200',
         status: 'active',
       }).toString(),
@@ -264,7 +252,6 @@ export class AdtService {
     const active = await client.search(
       'Encounter',
       new URLSearchParams({
-        _tag: tenantTagSearchValue(tenantId),
         class: 'IMP',
         status: 'in-progress',
         _count: '100',
@@ -287,15 +274,25 @@ export class AdtService {
     };
   }
 
+  /**
+   * Integrity checks (one active inpatient stay, one patient per bed, visit
+   * number sequence) must see the whole tenant, not just the caller's branch,
+   * so they read as the tenant's `system` member. Authorization for the
+   * resources involved is still established earlier by reading them as the
+   * caller.
+   */
+  private tenantWideClient(actor: MedplumActor) {
+    return this.medplum.getClient(systemActor(actor.tenantId));
+  }
+
   private async assertNoActiveInpatient(
     patientId: string,
-    tenantId: string,
+    actor: MedplumActor,
   ): Promise<void> {
-    const client = await this.medplum.getClient();
+    const client = this.tenantWideClient(actor);
     const bundle = await client.search(
       'Encounter',
       new URLSearchParams({
-        _tag: tenantTagSearchValue(tenantId),
         subject: `Patient/${patientId}`,
         class: 'IMP',
         status: 'in-progress',
@@ -311,15 +308,14 @@ export class AdtService {
 
   private async assertBedFree(
     bed: Location,
-    tenantId: string,
+    actor: MedplumActor,
     ignoreEncounterId?: string,
   ): Promise<void> {
     if (bed.operationalStatus?.code === 'O') {
-      const client = await this.medplum.getClient();
+      const client = this.tenantWideClient(actor);
       const bundle = await client.search(
         'Encounter',
         new URLSearchParams({
-          _tag: tenantTagSearchValue(tenantId),
           location: `Location/${bed.id}`,
           status: 'in-progress',
           _count: '5',
@@ -339,15 +335,13 @@ export class AdtService {
   private async setBedOccupancy(
     bed: Location,
     occupied: boolean,
-    tenantId: string,
+    actor: MedplumActor,
   ): Promise<void> {
-    const client = await this.medplum.getClient();
-    await client.updateResource(
-      applyTenantTag(
-        { ...bed, operationalStatus: bedOperationalStatus(occupied) },
-        tenantId,
-      ),
-    );
+    const client = this.medplum.getClient(actor);
+    await client.updateResource({
+      ...bed,
+      operationalStatus: bedOperationalStatus(occupied),
+    });
   }
 
   private activeLocationId(encounter: Encounter): string | undefined {
@@ -361,106 +355,78 @@ export class AdtService {
     return location.physicalType?.coding?.[0]?.code === 'bd';
   }
 
-  private async readPatient(id: string, tenantId: string): Promise<Patient> {
-    const client = await this.medplum.getClient();
+  /**
+   * Reads a resource as the caller. A resource outside their tenant or branch
+   * is invisible to them, so Medplum answers 404 and so do we; no tag check is
+   * needed here.
+   */
+  private async readVisible<
+    T extends 'Patient' | 'Encounter' | 'Location' | 'Practitioner',
+  >(resourceType: T, id: string, actor: MedplumActor) {
     try {
-      const patient = await client.readResource('Patient', id);
-      if (!belongsToTenant(patient, tenantId)) {
-        throw new NotFoundException(`Patient ${id} not found`);
-      }
-      return patient;
+      return await this.medplum.getClient(actor).readResource(resourceType, id);
     } catch (error) {
-      if (error instanceof NotFoundException) throw error;
-      throw new NotFoundException(`Patient ${id} not found`);
+      if (error instanceof HttpException) throw error;
+      throw new NotFoundException(`${resourceType} ${id} not found`);
     }
   }
 
-  private async readEncounter(
+  private readPatient(id: string, actor: MedplumActor): Promise<Patient> {
+    return this.readVisible('Patient', id, actor);
+  }
+
+  private readEncounter(id: string, actor: MedplumActor): Promise<Encounter> {
+    return this.readVisible('Encounter', id, actor);
+  }
+
+  private readLocation(id: string, actor: MedplumActor): Promise<Location> {
+    return this.readVisible('Location', id, actor);
+  }
+
+  private readPractitioner(
     id: string,
-    tenantId: string,
-  ): Promise<Encounter> {
-    const client = await this.medplum.getClient();
-    try {
-      const encounter = await client.readResource('Encounter', id);
-      if (!belongsToTenant(encounter, tenantId)) {
-        throw new NotFoundException(`Encounter ${id} not found`);
-      }
-      return encounter;
-    } catch (error) {
-      if (error instanceof NotFoundException) throw error;
-      throw new NotFoundException(`Encounter ${id} not found`);
-    }
+    actor: MedplumActor,
+  ): Promise<Practitioner> {
+    return this.readVisible('Practitioner', id, actor);
   }
 
-  private async readLocation(id: string, tenantId: string): Promise<Location> {
-    const client = await this.medplum.getClient();
-    try {
-      const location = await client.readResource('Location', id);
-      if (!belongsToTenant(location, tenantId)) {
-        throw new NotFoundException(`Location ${id} not found`);
-      }
-      return location;
-    } catch (error) {
-      if (error instanceof NotFoundException) throw error;
-      throw new NotFoundException(`Location ${id} not found`);
-    }
-  }
-
-  private async readBed(id: string, tenantId: string): Promise<Location> {
-    const location = await this.readLocation(id, tenantId);
+  private async readBed(id: string, actor: MedplumActor): Promise<Location> {
+    const location = await this.readLocation(id, actor);
     if (!this.isBed(location)) {
       throw new BadRequestException('Selected location is not a bed');
     }
     return location;
   }
 
-  private async readPractitioner(
-    id: string,
-    tenantId: string,
-  ): Promise<Practitioner> {
-    const client = await this.medplum.getClient();
+  /** The caller's branch `Organization` (or the tenant root) as `serviceProvider`. */
+  private async findServiceProvider(
+    actor: MedplumActor,
+  ): Promise<Reference<Organization> | undefined> {
+    const organizationId = this.registry.organizationForMember(actor);
+    if (!organizationId) return undefined;
     try {
-      const practitioner = await client.readResource('Practitioner', id);
-      if (!belongsToTenant(practitioner, tenantId)) {
-        throw new NotFoundException(`Practitioner ${id} not found`);
-      }
-      return practitioner;
+      const organization = await this.medplum
+        .getClient(actor)
+        .readResource('Organization', organizationId);
+      return {
+        reference: `Organization/${organization.id}`,
+        display: organization.name,
+      };
     } catch (error) {
-      if (error instanceof NotFoundException) throw error;
-      throw new NotFoundException(`Practitioner ${id} not found`);
+      if (error instanceof HttpException) throw error;
+      return undefined;
     }
   }
 
-  private async findTenantOrganization(
-    tenantId: string,
-  ): Promise<Reference<Organization> | undefined> {
-    const client = await this.medplum.getClient();
-    const bundle = await client.search(
-      'Organization',
-      new URLSearchParams({
-        _tag: tenantTagSearchValue(tenantId),
-        _count: '1',
-      }).toString(),
-    );
-    const organization = bundle.entry?.[0]?.resource as
-      Organization | undefined;
-    if (!organization?.id) return undefined;
-    return {
-      reference: `Organization/${organization.id}`,
-      display: organization.name,
-    };
-  }
-
   private async nextVisitNumber(
-    tenantId: string,
+    actor: MedplumActor,
     prefix: string,
   ): Promise<string> {
-    const client = await this.medplum.getClient();
+    const client = this.tenantWideClient(actor);
     const year = new Date().getFullYear();
     const bundle = await client.search(
       'Encounter',
       new URLSearchParams({
-        _tag: tenantTagSearchValue(tenantId),
         _count: '1',
         _sort: '-_lastUpdated',
         identifier: `${VISIT_NUMBER_SYSTEM}|`,

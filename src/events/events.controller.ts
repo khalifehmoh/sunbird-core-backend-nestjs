@@ -1,7 +1,7 @@
 import {
+  BadRequestException,
   Body,
   Controller,
-  ForbiddenException,
   Get,
   Headers,
   MessageEvent,
@@ -12,6 +12,7 @@ import {
   ServiceUnavailableException,
   Sse,
   UnauthorizedException,
+  UseGuards,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -24,7 +25,12 @@ import type { Encounter } from '@medplum/fhirtypes';
 import type { Request } from 'express';
 import { Observable } from 'rxjs';
 import { Public } from '../auth/public.decorator';
+import { PermissionsGuard } from '../auth/permissions.guard';
+import { RequirePermissions } from '../auth/require-permissions.decorator';
 import { User } from '../database/entities/user.entity';
+import { actorOf } from '../fhir/medplum-actor';
+import { PATIENT_MGMT_PERMISSIONS } from '../fhir/fhir.constants';
+import { MedplumRegistry } from '../fhir/medplum-registry';
 import { EventsService } from './events.service';
 
 type AuthenticatedRequest = Request & { user: User };
@@ -35,10 +41,12 @@ type AuthenticatedRequest = Request & { user: User };
  */
 @ApiTags('events')
 @Controller('events')
+@UseGuards(PermissionsGuard)
 export class EventsController {
   constructor(
     private readonly events: EventsService,
     private readonly config: ConfigService,
+    private readonly registry: MedplumRegistry,
   ) {}
 
   /**
@@ -50,6 +58,7 @@ export class EventsController {
   @ApiExcludeEndpoint()
   async fhirSubscription(
     @Headers('x-sunbird-subscription-secret') secret: string | undefined,
+    @Query('tenantId') tenantId: string | undefined,
     @Body() body: Encounter | { resourceType?: string },
   ): Promise<{ accepted: boolean; jobId?: string }> {
     this.assertEnabled();
@@ -64,11 +73,19 @@ export class EventsController {
       return { accepted: false };
     }
 
-    const result = await this.events.enqueueFromEncounter(body as Encounter);
+    if (!tenantId || !this.registry.tenant(tenantId)) {
+      throw new BadRequestException('Unknown tenantId');
+    }
+
+    const result = await this.events.enqueueFromEncounter(
+      body as Encounter,
+      tenantId,
+    );
     return { accepted: true, jobId: result.jobId };
   }
 
   @Get('notifications/:encounterId')
+  @RequirePermissions(PATIENT_MGMT_PERMISSIONS.read)
   @ApiCookieAuth('cookieAuth')
   @ApiOkResponse({
     description: 'Communications written by the bot and/or BullMQ paths.',
@@ -78,13 +95,10 @@ export class EventsController {
     @Param('encounterId') encounterId: string,
   ) {
     this.assertEnabled();
-    const tenantId = req.user?.tenant?.tenantId;
-    if (!tenantId) {
-      throw new ForbiddenException('User is not associated with a tenant');
-    }
+    const actor = actorOf(req.user);
     const communications = await this.events.listNotifications(
       encounterId,
-      tenantId,
+      actor,
     );
     return {
       encounterId,
@@ -99,6 +113,7 @@ export class EventsController {
    * complete|timeout.
    */
   @Sse('notifications/:encounterId/stream')
+  @RequirePermissions(PATIENT_MGMT_PERMISSIONS.read)
   @ApiCookieAuth('cookieAuth')
   streamNotifications(
     @Req() req: AuthenticatedRequest,
@@ -106,15 +121,10 @@ export class EventsController {
     @Query('timeoutMs') timeoutMsRaw?: string,
   ): Observable<MessageEvent> {
     this.assertEnabled();
-    const tenantId = req.user?.tenant?.tenantId;
-    if (!tenantId) {
-      throw new ForbiddenException('User is not associated with a tenant');
-    }
+    const actor = actorOf(req.user);
     const parsed = Number(timeoutMsRaw);
     const timeoutMs =
-      Number.isFinite(parsed) && parsed > 0
-        ? Math.min(parsed, 30_000)
-        : 15_000;
+      Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 30_000) : 15_000;
 
     return new Observable<MessageEvent>((subscriber) => {
       let cancelled = false;
@@ -123,7 +133,7 @@ export class EventsController {
         try {
           for await (const snapshot of this.events.watchNotifications(
             encounterId,
-            tenantId,
+            actor,
             timeoutMs,
           )) {
             if (cancelled) break;

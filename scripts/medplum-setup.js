@@ -3,18 +3,22 @@
  * Provision the local Medplum instance and load demo FHIR data.
  *
  *   npm run medplum:up          start containers, provision, seed (default)
- *   npm run medplum:provision   project + service client only
+ *   npm run medplum:provision   tenants, branches, memberships only
  *   npm run medplum:seed        demo FHIR data only
  *   npm run medplum:down        stop containers (data volumes are kept)
  *
- * Flags: --reseed  rewrite demo resources even when they already exist
+ * Each Sunbird tenant becomes its own Medplum Project, with a Project Admin
+ * service client, an Organization per branch, and one ProjectMembership per
+ * user (scoped to that user's branch). The API calls Medplum on behalf of
+ * those memberships; see src/fhir/medplum.service.ts. What the API needs to do
+ * that (client credentials, membership ids) is written to the registry file
+ * (MEDPLUM_TENANTS_FILE, default .medplum/tenants.json, gitignored).
  *
  * Provisioning uses the super-admin ClientApplication that Medplum seeds on
- * first boot from MEDPLUM_DEFAULT_SUPER_ADMIN_CLIENT_ID/SECRET, so nothing here
- * needs an interactive login. It then creates a dedicated, non-super-admin
- * project for clinical data and a service client scoped to it, which is what
- * the API authenticates as. Everything is idempotent: fixed resource ids and
- * FHIR conditional creates mean re-running changes nothing.
+ * first boot from MEDPLUM_DEFAULT_SUPER_ADMIN_CLIENT_ID/SECRET, and nothing
+ * else does. Everything is idempotent: ids are derived from Sunbird ids, so
+ * re-running converges on the same state, and memberships of users who are no
+ * longer eligible are deleted.
  */
 
 const fs = require('node:fs');
@@ -22,11 +26,11 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { Client } = require('pg');
+const lib = require('./lib/medplum-admin');
 
 const ROOT = path.resolve(__dirname, '..');
 const ENV_PATH = path.join(ROOT, '.env');
 
-const TENANT_TAG_SYSTEM = 'https://sunbird.health/fhir/tenant-id';
 const NATIONAL_ID_SYSTEM = 'http://nphies.sa/identifier/nationalid';
 const IQAMA_SYSTEM = 'http://nphies.sa/identifier/iqama';
 const MRN_SYSTEM = 'https://sunbird.health/fhir/mrn';
@@ -135,14 +139,10 @@ function config() {
     superAdminClientSecret:
       process.env.MEDPLUM_SUPER_ADMIN_CLIENT_SECRET ??
       'f794e61944c87470475dbc1b7546be030d6ba3d71394a733b44d19815979f032',
-    projectId:
-      process.env.MEDPLUM_PROJECT_ID ??
-      '57e5cf20-efef-4ec0-beef-95c25e13525f',
-    clientId:
-      process.env.MEDPLUM_CLIENT_ID ?? 'cf8609dd-b80e-4ecf-82ff-61d07c0fed22',
-    clientSecret:
-      process.env.MEDPLUM_CLIENT_SECRET ??
-      'ccb80fb669cd66705fa1dbd23168dacc109f87cd6832bb8781f31d1893b09506',
+    registryFile: path.resolve(
+      ROOT,
+      process.env.MEDPLUM_TENANTS_FILE ?? '.medplum/tenants.json',
+    ),
     db: {
       host: process.env.DB_HOST ?? 'localhost',
       port: Number(process.env.DB_PORT ?? 5432),
@@ -157,39 +157,11 @@ function config() {
 // Medplum HTTP helpers
 // ---------------------------------------------------------------------------
 
-async function getToken(cfg, clientId, clientSecret) {
-  const response = await fetch(new URL('oauth2/token', cfg.baseUrl), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'client_credentials',
-      client_id: clientId,
-      client_secret: clientSecret,
-    }),
-  });
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`Token request failed (${response.status}): ${text}`);
-  }
-  return JSON.parse(text).access_token;
-}
+const getToken = (cfg, clientId, clientSecret) =>
+  lib.getToken(cfg.baseUrl, clientId, clientSecret);
 
-async function fhir(cfg, token, method, url, body) {
-  const response = await fetch(new URL(`fhir/R4/${url}`, cfg.baseUrl), {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/fhir+json',
-      ...(body ? { 'Content-Type': 'application/fhir+json' } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`${method} ${url} failed (${response.status}): ${text}`);
-  }
-  return text ? JSON.parse(text) : undefined;
-}
+const fhir = (cfg, token, method, url, body, options) =>
+  lib.fhir(cfg.baseUrl, token, method, url, body, options);
 
 async function waitForHealth(cfg, timeoutMs = 600000) {
   const url = new URL('healthcheck', cfg.baseUrl);
@@ -234,71 +206,72 @@ function compose(args) {
 // ---------------------------------------------------------------------------
 
 async function provision(cfg) {
-  const token = await getToken(
+  const core = await readCore(cfg);
+  if (core.length === 0) {
+    console.log(
+      'No Sunbird tenants readable from the core database; nothing to provision.\n' +
+        'Start Postgres and run `npm run db:setup` first, then `npm run medplum:provision`.',
+    );
+    return;
+  }
+
+  const adminToken = await getToken(
     cfg,
     cfg.superAdminClientId,
     cfg.superAdminClientSecret,
   );
+  const registry = lib.loadRegistry(cfg.registryFile);
+  registry.tenants ??= {};
 
-  // strictMode makes Medplum validate every write against the FHIR R4
-  // StructureDefinitions rather than accepting loosely-shaped JSON.
-  await fhir(cfg, token, 'PUT', `Project/${cfg.projectId}`, {
-    resourceType: 'Project',
-    id: cfg.projectId,
-    name: 'Sunbird Clinical Demo',
-    description:
-      'Clinical data repository for the Sunbird platform (patient management spike).',
-    strictMode: true,
-    // Required for Medplum Bot $deploy / Subscription → Bot (event-driven spike).
-    features: ['bots'],
-  });
-  console.log(`Project ready: ${cfg.projectId}`);
+  for (const { tenant, branches, users } of core) {
+    const { record, skipped, removed } = await lib.provisionTenant({
+      baseUrl: cfg.baseUrl,
+      adminToken,
+      tenant,
+      branches,
+      users,
+      previous: registry.tenants[tenant.tenant_id],
+    });
+    registry.tenants[tenant.tenant_id] = record;
+    // Persist after each tenant so a failure part-way keeps what succeeded.
+    lib.saveRegistry(cfg.registryFile, registry);
 
-  await fhir(cfg, token, 'PUT', `ClientApplication/${cfg.clientId}`, {
-    resourceType: 'ClientApplication',
-    id: cfg.clientId,
-    meta: { project: cfg.projectId },
-    name: 'Sunbird Core API',
-    description:
-      'Server-to-server client. The NestJS API is the only consumer; browsers never use this.',
-    secret: cfg.clientSecret,
-  });
-  console.log(`Service client ready: ${cfg.clientId}`);
-
-  // A membership is what actually binds the client to the project and gives it
-  // an access profile. Fixed id keeps this idempotent.
-  const membershipId = cfg.clientId;
-  await fhir(cfg, token, 'PUT', `ProjectMembership/${membershipId}`, {
-    resourceType: 'ProjectMembership',
-    id: membershipId,
-    meta: { project: cfg.projectId },
-    project: { reference: `Project/${cfg.projectId}` },
-    user: { reference: `ClientApplication/${cfg.clientId}` },
-    profile: { reference: `ClientApplication/${cfg.clientId}` },
-  });
-  console.log(`Project membership ready: ${membershipId}`);
-
-  // Prove the credentials the API will use actually work.
-  const serviceToken = await getToken(cfg, cfg.clientId, cfg.clientSecret);
-  const me = await (
-    await fetch(new URL('auth/me', cfg.baseUrl), {
-      headers: { Authorization: `Bearer ${serviceToken}` },
-    })
-  ).json();
-  if (me.project?.id !== cfg.projectId) {
-    throw new Error(
-      `Service client resolved to project ${me.project?.id}, expected ${cfg.projectId}`,
+    const memberCount = Object.keys(record.members).length - 1;
+    console.log(
+      `${tenant.tenant_code}: Project ${record.projectId}, ` +
+        `${branches.length} branch(es), ${memberCount} member(s)`,
     );
+    if (skipped.length > 0) {
+      console.log(
+        `  no clinical access (no valid default branch): ${skipped.join(', ')}`,
+      );
+    }
+    if (removed.length > 0) {
+      console.log(`  removed memberships: ${removed.join(', ')}`);
+    }
+
+    // Prove the credentials the API will use work and are scoped to the Project.
+    const token = await getToken(cfg, record.clientId, record.clientSecret);
+    const me = await (
+      await fetch(new URL('auth/me', cfg.baseUrl), {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+    ).json();
+    if (me.project?.id !== record.projectId) {
+      throw new Error(
+        `Client for ${tenant.tenant_code} resolved to project ${me.project?.id}, expected ${record.projectId}`,
+      );
+    }
   }
-  console.log(`Verified service client is scoped to "${me.project.name}".`);
-  return serviceToken;
+  console.log(`Registry written to ${path.relative(ROOT, cfg.registryFile)}`);
 }
 
 // ---------------------------------------------------------------------------
 // demo FHIR data
 // ---------------------------------------------------------------------------
 
-async function readTenants(cfg) {
+/** Tenants with their active branches and eligible users, from the core DB. */
+async function readCore(cfg) {
   if (!cfg.db.password) {
     return [];
   }
@@ -309,13 +282,36 @@ async function readTenants(cfg) {
     return [];
   }
   try {
-    const result = await client.query(
-      `SELECT tenant_id, tenant_code, tenant_name, tenant_name_ar, city
-         FROM core.tenants
-        WHERE is_deleted = FALSE
-        ORDER BY tenant_code`,
-    );
-    return result.rows;
+    const tenants = (
+      await client.query(
+        `SELECT tenant_id, tenant_code, tenant_name, tenant_name_ar, city
+           FROM core.tenants
+          WHERE is_deleted = FALSE
+          ORDER BY tenant_code`,
+      )
+    ).rows;
+    const branches = (
+      await client.query(
+        `SELECT branch_id, tenant_id, branch_code, branch_name, branch_name_ar,
+                is_headquarters
+           FROM core.branches
+          WHERE is_deleted = FALSE AND status = 'ACTIVE'
+          ORDER BY is_headquarters DESC NULLS LAST, branch_code`,
+      )
+    ).rows;
+    const users = (
+      await client.query(
+        `SELECT user_id, tenant_id, username, first_name, last_name, default_branch_id
+           FROM core.users
+          WHERE tenant_id IS NOT NULL AND is_deleted = FALSE AND status = 'ACTIVE'
+          ORDER BY username`,
+      )
+    ).rows;
+    return tenants.map((tenant) => ({
+      tenant,
+      branches: branches.filter((b) => b.tenant_id === tenant.tenant_id),
+      users: users.filter((u) => u.tenant_id === tenant.tenant_id),
+    }));
   } catch {
     return [];
   } finally {
@@ -351,11 +347,10 @@ function humanNames(person) {
   ];
 }
 
-function patientResource(person, tenant, orgUrn, index) {
+function patientResource(person, tenant, orgRef, index) {
   const resident = person.residency === 'resident';
   return {
     resourceType: 'Patient',
-    meta: { tag: [{ system: TENANT_TAG_SYSTEM, code: tenant.tenant_id }] },
     identifier: [
       {
         use: 'official',
@@ -384,7 +379,7 @@ function patientResource(person, tenant, orgUrn, index) {
         },
         system: MRN_SYSTEM,
         value: `${tenant.tenant_code}-${String(index + 1).padStart(5, '0')}`,
-        assigner: { reference: orgUrn, display: tenant.tenant_name },
+        assigner: { reference: orgRef, display: tenant.tenant_name },
       },
     ],
     active: true,
@@ -423,14 +418,13 @@ function patientResource(person, tenant, orgUrn, index) {
         preferred: true,
       },
     ],
-    managingOrganization: { reference: orgUrn, display: tenant.tenant_name },
+    managingOrganization: { reference: orgRef, display: tenant.tenant_name },
   };
 }
 
-function vitalSign({ code, display, value, unit, ucum, patientUrn, tenantId }) {
+function vitalSign({ code, display, value, unit, ucum, patientUrn }) {
   return {
     resourceType: 'Observation',
-    meta: { tag: [{ system: TENANT_TAG_SYSTEM, code: tenantId }] },
     status: 'final',
     category: [
       {
@@ -451,10 +445,9 @@ function vitalSign({ code, display, value, unit, ucum, patientUrn, tenantId }) {
   };
 }
 
-function bloodPressure(patientUrn, tenantId, systolic, diastolic) {
+function bloodPressure(patientUrn, systolic, diastolic) {
   return {
     resourceType: 'Observation',
-    meta: { tag: [{ system: TENANT_TAG_SYSTEM, code: tenantId }] },
     status: 'final',
     category: [
       {
@@ -510,6 +503,16 @@ function bloodPressure(patientUrn, tenantId, systolic, diastolic) {
       },
     ],
   };
+}
+
+/** The first branch gets the full demo set, others a smaller, distinct one. */
+function branchPeople(branchIndex) {
+  const people = demoPeople();
+  if (branchIndex === 0) return people;
+  return people.slice(0, 2).map((person) => ({
+    ...person,
+    nationalId: String(Number(person.nationalId) + branchIndex),
+  }));
 }
 
 function demoPeople() {
@@ -602,9 +605,17 @@ function entryFor(fullUrl, resource, conditionalUrl) {
  * Medplum treats as a placeholder to resolve, so a readable slug there would be
  * stored verbatim and leave the references dangling.
  */
-function seedBundle(tenant) {
-  const tenantId = tenant.tenant_id;
-  const orgUrn = `urn:uuid:${randomUUID()}`;
+function seedBundle(baseTenant, branch) {
+  // Identifiers are keyed on tenant_code; give every branch its own so the
+  // conditional updates of one branch never match another branch's records.
+  const tenant =
+    branch.index === 0
+      ? baseTenant
+      : {
+          ...baseTenant,
+          tenant_code: `${baseTenant.tenant_code}-${branch.code}`,
+        };
+  const orgRef = `Organization/${branch.organizationId}`;
   const practitionerUrn = `urn:uuid:${randomUUID()}`;
   const wardMedUrn = `urn:uuid:${randomUUID()}`;
   const wardSurgUrn = `urn:uuid:${randomUUID()}`;
@@ -634,34 +645,9 @@ function seedBundle(tenant) {
 
   const entry = [
     entryFor(
-      orgUrn,
-      {
-        resourceType: 'Organization',
-        meta: { tag: [{ system: TENANT_TAG_SYSTEM, code: tenantId }] },
-        identifier: [{ system: ORG_SYSTEM, value: tenant.tenant_code }],
-        active: true,
-        name: tenant.tenant_name,
-        alias: tenant.tenant_name_ar ? [tenant.tenant_name_ar] : undefined,
-        type: [
-          {
-            coding: [
-              {
-                system:
-                  'http://terminology.hl7.org/CodeSystem/organization-type',
-                code: 'prov',
-                display: 'Healthcare Provider',
-              },
-            ],
-          },
-        ],
-      },
-      `Organization?identifier=${ORG_SYSTEM}|${tenant.tenant_code}`,
-    ),
-    entryFor(
       practitionerUrn,
       {
         resourceType: 'Practitioner',
-        meta: { tag: [{ system: TENANT_TAG_SYSTEM, code: tenantId }] },
         identifier: [
           {
             system: DEMO_SYSTEM,
@@ -691,7 +677,6 @@ function seedBundle(tenant) {
         urn,
         {
           resourceType: 'Location',
-          meta: { tag: [{ system: TENANT_TAG_SYSTEM, code: tenantId }] },
           identifier: [{ system: LOCATION_CODE_SYSTEM, value: scopedCode }],
           status: 'active',
           name,
@@ -707,7 +692,7 @@ function seedBundle(tenant) {
             text: physicalDisplay,
           },
           alias: [code],
-          managingOrganization: { reference: orgUrn },
+          managingOrganization: { reference: orgRef },
           ...(partOfUrn ? { partOf: { reference: partOfUrn } } : {}),
           ...(physicalType === 'bd'
             ? {
@@ -743,7 +728,7 @@ function seedBundle(tenant) {
     );
   }
 
-  demoPeople().forEach((person, index) => {
+  branchPeople(branch.index).forEach((person, index) => {
     const patientUrn = `urn:uuid:${randomUUID()}`;
     const encounterUrn = `urn:uuid:${randomUUID()}`;
     const demoId = `${tenant.tenant_code}-${person.key}`;
@@ -760,7 +745,7 @@ function seedBundle(tenant) {
     entry.push(
       entryFor(
         patientUrn,
-        patientResource(person, tenant, orgUrn, index),
+        patientResource(person, tenant, orgRef, index),
         `Patient?identifier=${MRN_SYSTEM}|${mrn}`,
       ),
     );
@@ -772,7 +757,6 @@ function seedBundle(tenant) {
           resourceType: 'Encounter',
           meta: {
             tag: [
-              { system: TENANT_TAG_SYSTEM, code: tenantId },
               {
                 system: ADT_EVENT_SYSTEM,
                 code: isInpatient ? 'A01' : 'A04',
@@ -818,7 +802,7 @@ function seedBundle(tenant) {
               },
             },
           ],
-          serviceProvider: { reference: orgUrn },
+          serviceProvider: { reference: orgRef },
           period: { start: encounterStart },
           location: [
             {
@@ -844,7 +828,7 @@ function seedBundle(tenant) {
     );
 
     const observations = [
-      bloodPressure(patientUrn, tenantId, ...person.vitals.bp),
+      bloodPressure(patientUrn, ...person.vitals.bp),
       vitalSign({
         code: '8867-4',
         display: 'Heart rate',
@@ -852,7 +836,6 @@ function seedBundle(tenant) {
         unit: '/min',
         ucum: '/min',
         patientUrn,
-        tenantId,
       }),
       vitalSign({
         code: '8310-5',
@@ -861,7 +844,6 @@ function seedBundle(tenant) {
         unit: 'Cel',
         ucum: 'Cel',
         patientUrn,
-        tenantId,
       }),
       vitalSign({
         code: '29463-7',
@@ -870,7 +852,6 @@ function seedBundle(tenant) {
         unit: 'kg',
         ucum: 'kg',
         patientUrn,
-        tenantId,
       }),
       vitalSign({
         code: '8302-2',
@@ -879,7 +860,6 @@ function seedBundle(tenant) {
         unit: 'cm',
         ucum: 'cm',
         patientUrn,
-        tenantId,
       }),
     ];
 
@@ -905,7 +885,6 @@ function seedBundle(tenant) {
           `urn:uuid:${randomUUID()}`,
           {
             resourceType: 'Condition',
-            meta: { tag: [{ system: TENANT_TAG_SYSTEM, code: tenantId }] },
             identifier: [{ system: DEMO_SYSTEM, value }],
             clinicalStatus: {
               coding: [
@@ -964,7 +943,6 @@ function seedBundle(tenant) {
           `urn:uuid:${randomUUID()}`,
           {
             resourceType: 'AllergyIntolerance',
-            meta: { tag: [{ system: TENANT_TAG_SYSTEM, code: tenantId }] },
             identifier: [{ system: DEMO_SYSTEM, value }],
             clinicalStatus: {
               coding: [
@@ -1005,6 +983,17 @@ function seedBundle(tenant) {
     });
   });
 
+  // Stamp the branch onto everything, so a member scoped to another branch
+  // cannot see it. Writing meta.accounts needs a project admin in extended mode.
+  const account = { reference: orgRef };
+  for (const item of entry) {
+    item.resource.meta = {
+      ...item.resource.meta,
+      account,
+      accounts: [account],
+    };
+  }
+
   return { resourceType: 'Bundle', type: 'transaction', entry };
 }
 
@@ -1022,19 +1011,40 @@ function summarize(bundle) {
     .join(', ');
 }
 
-async function seed(cfg, token) {
-  const tenants = await readTenants(cfg);
-  if (tenants.length === 0) {
+async function seed(cfg) {
+  const registry = lib.loadRegistry(cfg.registryFile);
+  const core = await readCore(cfg);
+  const provisioned = core.filter(({ tenant }) => registry.tenants?.[tenant.tenant_id]);
+  if (provisioned.length === 0) {
     console.log(
-      'No Sunbird tenants readable from the core database; skipping FHIR seed.\n' +
-        'Start Postgres and run `npm run db:setup` first, then `npm run medplum:seed`.',
+      'No provisioned tenants found; skipping FHIR seed.\n' +
+        'Run `npm run medplum:provision` first, then `npm run medplum:seed`.',
     );
     return;
   }
 
-  for (const tenant of tenants) {
-    const result = await fhir(cfg, token, 'POST', '', seedBundle(tenant));
-    console.log(`${tenant.tenant_name}: ${summarize(result)}`);
+  for (const { tenant, branches } of provisioned) {
+    const record = registry.tenants[tenant.tenant_id];
+    // The tenant's own Project Admin client: seeding is an administrative act
+    // inside one Project, and nothing here can reach another tenant.
+    const token = await getToken(cfg, record.clientId, record.clientSecret);
+    for (const [index, branch] of branches.entries()) {
+      const result = await fhir(
+        cfg,
+        token,
+        'POST',
+        '',
+        seedBundle(tenant, {
+          index,
+          code: branch.branch_code,
+          organizationId: record.branches[branch.branch_id],
+        }),
+        { extended: true },
+      );
+      console.log(
+        `${tenant.tenant_code}/${branch.branch_code}: ${summarize(result)}`,
+      );
+    }
   }
 }
 
@@ -1046,8 +1056,8 @@ function usage() {
   console.log(`Usage: node scripts/medplum-setup.js [up|provision|seed|down]
 
   up         Start Medplum containers, provision, and seed demo data (default)
-  provision  Create the clinical project and the API service client
-  seed       Load demo FHIR resources for every Sunbird tenant
+  provision  Create a Project, service client, branches and memberships per tenant
+  seed       Load demo FHIR resources into every provisioned tenant, per branch
   down       Stop the Medplum containers (data volumes are kept)`);
 }
 
@@ -1079,29 +1089,25 @@ async function main() {
 
   await waitForHealth(cfg);
 
-  let token;
   if (command === 'up' || command === 'provision') {
-    token = await provision(cfg);
-  } else {
-    token = await getToken(cfg, cfg.clientId, cfg.clientSecret);
+    await provision(cfg);
   }
 
   if (command === 'up' || command === 'seed') {
-    await seed(cfg, token);
+    await seed(cfg);
   }
 
   if (command === 'up') {
     writeEnvValues({
       MEDPLUM_ENABLED: 'true',
       MEDPLUM_BASE_URL: cfg.baseUrl,
-      MEDPLUM_CLIENT_ID: cfg.clientId,
-      MEDPLUM_CLIENT_SECRET: cfg.clientSecret,
-      MEDPLUM_PROJECT_ID: cfg.projectId,
+      MEDPLUM_TENANTS_FILE: path.relative(ROOT, cfg.registryFile),
     });
     console.log(
       `\nMedplum is ready at ${cfg.baseUrl}\n` +
         'FHIR reaches the browser through this API at /api/v1/fhir/R4.\n' +
-        'Restart the API (npm run start:dev) to pick up the new .env values.',
+        'Restart the API (npm run start:dev) to pick up the new .env values.\n' +
+        'Run `npm run medplum:provision` again after adding users or branches.',
     );
   }
 }

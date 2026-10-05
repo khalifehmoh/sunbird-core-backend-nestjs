@@ -1,24 +1,32 @@
-import { All, Controller, Param, Req, Res } from '@nestjs/common';
+import {
+  All,
+  Controller,
+  ForbiddenException,
+  HttpException,
+  Param,
+  Req,
+  Res,
+} from '@nestjs/common';
 import { ApiCookieAuth, ApiExcludeEndpoint, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
-import type { OperationOutcome, Resource } from '@medplum/fhirtypes';
+import type { OperationOutcome } from '@medplum/fhirtypes';
+import { assertPermissions } from '../auth/permissions';
 import { User } from '../database/entities/user.entity';
 import {
   ALLOWED_OPERATIONS,
   FHIR_JSON_CONTENT_TYPE,
+  PATIENT_MGMT_PERMISSIONS,
   READONLY_RESOURCE_TYPES,
   WRITABLE_RESOURCE_TYPES,
 } from './fhir.constants';
+import { actorOf, type MedplumActor } from './medplum-actor';
 import { MedplumService } from './medplum.service';
-import {
-  applyTenantTag,
-  belongsToTenant,
-  scopeSearchParams,
-} from './tenant-scope';
+import { collectReferences } from './references';
 
 type AuthenticatedRequest = Request & { user: User };
 
 const READ_METHODS = new Set(['GET', 'HEAD']);
+const MAX_REFERENCES_PER_WRITE = 50;
 
 /**
  * The only FHIR surface this platform exposes.
@@ -27,10 +35,15 @@ const READ_METHODS = new Set(['GET', 'HEAD']);
  * are pointed at this path instead of at Medplum. Everything still goes through
  * the existing cookie-JWT guard, and Medplum's URL never reaches the browser.
  *
- * This is a gate, not a pass-through: unlisted resource types are refused,
- * terminology is read-only, and clinical traffic is constrained to the caller's
- * tenant. Errors are returned as `OperationOutcome` so callers stay on the
- * FHIR contract rather than this API's own error shape.
+ * Tenant and branch isolation is not decided here. Every request is delegated
+ * to the caller's own Medplum `ProjectMembership`, so Medplum applies that
+ * member's access policy to the request itself, whatever shape it takes:
+ * searches, conditional writes, `_include`, `$graphql`, `$everything`. What the
+ * gateway still owns is the surface (an allow-list of resource types and
+ * operations), the Sunbird permission codes, and the one thing Medplum does not
+ * check, that the targets of a write's references are visible to the caller.
+ * Errors are returned as `OperationOutcome` so callers stay on the FHIR
+ * contract rather than this API's own error shape.
  */
 @ApiTags('fhir')
 @ApiCookieAuth('cookieAuth')
@@ -46,23 +59,33 @@ export class FhirGatewayController {
     @Req() req: AuthenticatedRequest,
     @Res() res: Response,
   ): Promise<void> {
+    try {
+      await this.handle(pathParam, req, res);
+    } catch (error) {
+      if (!(error instanceof HttpException)) throw error;
+      this.sendOutcome(
+        res,
+        error.getStatus(),
+        this.issueCodeFor(error.getStatus()),
+        error.message,
+      );
+    }
+  }
+
+  private async handle(
+    pathParam: string | string[],
+    req: AuthenticatedRequest,
+    res: Response,
+  ): Promise<void> {
     const segments = (
       Array.isArray(pathParam) ? pathParam : [pathParam]
     ).filter(Boolean);
-    const tenantId = req.user?.tenant?.tenantId;
-    if (!tenantId) {
-      this.sendOutcome(
-        res,
-        403,
-        'forbidden',
-        'User is not associated with a tenant',
-      );
-      return;
-    }
+    const actor = actorOf(req.user);
 
-    const [head, id] = segments;
+    const [head] = segments;
     const isOperation = head?.startsWith('$') || head === 'metadata';
     const isWrite = !READ_METHODS.has(req.method);
+    const path = segments.join('/');
 
     if (isOperation) {
       if (!ALLOWED_OPERATIONS.includes(head as never)) {
@@ -74,7 +97,13 @@ export class FhirGatewayController {
         );
         return;
       }
-      await this.forward(req, res, segments.join('/'), req.body);
+      if (head === '$graphql') {
+        assertPermissions(req.user, PATIENT_MGMT_PERMISSIONS.read);
+        if (this.isGraphqlMutation(req.body)) {
+          throw new ForbiddenException('GraphQL mutations are not exposed');
+        }
+      }
+      await this.forward(actor, req, res, path, req.body);
       return;
     }
 
@@ -100,112 +129,85 @@ export class FhirGatewayController {
       return;
     }
 
-    // Terminology and conformance resources are shared, not tenant-owned.
-    const tenantScoped = writable;
-    const path = segments.join('/');
+    assertPermissions(req.user, this.permissionFor(req.method, segments));
 
-    if (isWrite && tenantScoped) {
-      // Reject writes aimed at another tenant's resource before they happen;
-      // a tag check on the response would be too late.
-      if (id && !(await this.isVisible(head, id, tenantId))) {
-        this.sendOutcome(res, 404, 'not-found', 'Resource not found');
+    if (isWrite && req.body && typeof req.body === 'object') {
+      const rejection = await this.unreachableReference(actor, req.body);
+      if (rejection) {
+        this.sendOutcome(res, 400, 'invalid', rejection);
         return;
       }
-      const body: unknown =
-        req.body && typeof req.body === 'object'
-          ? applyTenantTag(req.body as Resource, tenantId)
-          : req.body;
-      await this.forward(req, res, path, body);
-      return;
     }
-
-    if (!tenantScoped) {
-      await this.forward(req, res, path, req.body);
-      return;
-    }
-
-    if (id && segments.length === 2) {
-      // Plain instance read: forward, then drop the response if the resource
-      // belongs to another tenant. 404 rather than 403, so the gateway does not
-      // confirm that an out-of-scope id exists.
-      const response = await this.forward(req, res, path, req.body, {
-        defer: true,
-      });
-      const resource = this.parse(response.body);
-      if (
-        response.status === 200 &&
-        resource &&
-        !belongsToTenant(resource, tenantId)
-      ) {
-        this.sendOutcome(res, 404, 'not-found', 'Resource not found');
-        return;
-      }
-      this.send(req, res, response);
-      return;
-    }
-
-    if (id) {
-      // Instance sub-paths (`_history`, `$everything`) answer with a Bundle,
-      // which carries no tenant tag of its own — so authorize the instance
-      // first and forward the response untouched.
-      if (!(await this.isVisible(head, id, tenantId))) {
-        this.sendOutcome(res, 404, 'not-found', 'Resource not found');
-        return;
-      }
-      await this.forward(req, res, path, req.body);
-      return;
-    }
-
-    // Search: force the tenant filter, discarding any caller-supplied `_tag`.
-    const search = scopeSearchParams(
-      new URLSearchParams(req.url.split('?')[1] ?? ''),
-      tenantId,
-    ).toString();
-    await this.forward(req, res, path, req.body, { search });
+    await this.forward(actor, req, res, path, req.body);
   }
 
-  private async isVisible(
-    resourceType: string,
-    id: string,
-    tenantId: string,
-  ): Promise<boolean> {
-    const existing = await this.medplum.request({
-      method: 'GET',
-      path: `${resourceType}/${id}`,
-    });
-    if (existing.status !== 200) {
-      return false;
+  /** Sunbird permission code a FHIR interaction needs. */
+  private permissionFor(method: string, segments: string[]): string {
+    const isSearchPost = method === 'POST' && segments.at(-1) === '_search';
+    if (READ_METHODS.has(method) || isSearchPost) {
+      return PATIENT_MGMT_PERMISSIONS.read;
     }
-    const resource = this.parse(existing.body);
-    return !!resource && belongsToTenant(resource, tenantId);
+    if (method === 'POST') {
+      // `POST Patient` creates; `POST Patient/1/$op` changes an instance.
+      return segments.length > 1
+        ? PATIENT_MGMT_PERMISSIONS.update
+        : PATIENT_MGMT_PERMISSIONS.create;
+    }
+    if (method === 'DELETE') {
+      return PATIENT_MGMT_PERMISSIONS.delete;
+    }
+    return PATIENT_MGMT_PERMISSIONS.update;
+  }
+
+  /**
+   * Resolves every reference in a write body as the caller. Returns a message
+   * when one cannot be seen by them, which includes references into another
+   * branch or tenant, because Medplum answers 404 for those.
+   */
+  private async unreachableReference(
+    actor: MedplumActor,
+    body: unknown,
+  ): Promise<string | undefined> {
+    const { local, unverifiable } = collectReferences(body);
+    if (unverifiable.length > 0) {
+      return `Reference ${unverifiable[0]} cannot be verified; use a relative Type/id reference`;
+    }
+    if (local.length > MAX_REFERENCES_PER_WRITE) {
+      return `A write may reference at most ${MAX_REFERENCES_PER_WRITE} resources`;
+    }
+    const checks = await Promise.all(
+      local.map(async (reference) => {
+        const { status } = await this.medplum.request(actor, {
+          method: 'GET',
+          path: reference,
+        });
+        return status === 200 ? undefined : reference;
+      }),
+    );
+    const missing = checks.find((reference) => reference !== undefined);
+    return missing ? `Reference ${missing} not found` : undefined;
+  }
+
+  private isGraphqlMutation(body: unknown): boolean {
+    const query = (body as { query?: unknown } | undefined)?.query;
+    return typeof query === 'string' && /\bmutation\b/i.test(query);
   }
 
   private async forward(
+    actor: MedplumActor,
     req: AuthenticatedRequest,
     res: Response,
     path: string,
     body: unknown,
-    options?: { search?: string; defer?: boolean },
-  ): Promise<{ status: number; contentType: string; body: string }> {
+  ): Promise<void> {
     const hasBody = body !== undefined && body !== null && req.method !== 'GET';
-    const response = await this.medplum.request({
+    const response = await this.medplum.request(actor, {
       method: req.method,
       path,
-      search: options?.search ?? req.url.split('?')[1],
+      search: req.url.split('?')[1],
       body: hasBody ? JSON.stringify(body) : undefined,
       contentType: req.headers['content-type'],
     });
-    if (!options?.defer) {
-      this.send(req, res, response);
-    }
-    return response;
-  }
-
-  private send(
-    req: Request,
-    res: Response,
-    response: { status: number; contentType: string; body: string },
-  ): void {
     res
       .status(response.status)
       .type(response.contentType)
@@ -227,12 +229,14 @@ export class FhirGatewayController {
     return body.replaceAll(internal, publicBase);
   }
 
-  private parse(body: string): Resource | undefined {
-    try {
-      return JSON.parse(body) as Resource;
-    } catch {
-      return undefined;
-    }
+  private issueCodeFor(
+    status: number,
+  ): OperationOutcome['issue'][number]['code'] {
+    if (status === 403) return 'forbidden';
+    if (status === 401) return 'login';
+    if (status === 503) return 'transient';
+    if (status === 400) return 'invalid';
+    return 'exception';
   }
 
   private sendOutcome(
