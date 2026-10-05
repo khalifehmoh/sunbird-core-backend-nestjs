@@ -4,6 +4,7 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ValidationError } from 'class-validator';
 import cookieParser from 'cookie-parser';
+import { json } from 'express';
 import { AppModule } from './app.module';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
 
@@ -12,6 +13,20 @@ async function bootstrap() {
   const config = app.get(ConfigService);
 
   app.use(cookieParser());
+  // FHIR clients send `application/fhir+json`, which the default JSON parser
+  // ignores. Nest skips registering its own parser once it sees a `jsonParser`
+  // in the stack, so this one has to cover plain JSON as well — it replaces
+  // Nest's parser rather than adding to it.
+  app.use(
+    json({
+      type: [
+        'application/json',
+        'application/fhir+json',
+        'application/json-patch+json',
+      ],
+      limit: '1mb',
+    }),
+  );
   app.setGlobalPrefix('api/v1');
   const allowedOrigins = config
     .getOrThrow<string>('CORS_ALLOWED_ORIGINS')
@@ -38,6 +53,9 @@ async function bootstrap() {
       'Content-Type',
       'Origin',
       'X-Requested-With',
+      // `@medplum/react` sets this on every FHIR call. The gateway does not
+      // forward it, but the preflight has to pass or the request never runs.
+      'X-Medplum',
     ],
     exposedHeaders: ['Set-Cookie'],
     credentials: true,

@@ -27,6 +27,27 @@ export const configuration = () => ({
     sameSite: process.env.COOKIE_SAME_SITE ?? 'lax',
     domain: process.env.COOKIE_DOMAIN || undefined,
   },
+  medplum: {
+    enabled: process.env.MEDPLUM_ENABLED === 'true',
+    baseUrl: process.env.MEDPLUM_BASE_URL ?? 'http://localhost:8103/',
+    clientId: process.env.MEDPLUM_CLIENT_ID,
+    clientSecret: process.env.MEDPLUM_CLIENT_SECRET,
+    projectId: process.env.MEDPLUM_PROJECT_ID,
+  },
+  events: {
+    enabled: process.env.EVENTS_ENABLED === 'true',
+    subscriptionSecret:
+      process.env.EVENTS_SUBSCRIPTION_SECRET ??
+      'local-subscription-secret-change-me',
+    redis: {
+      host: process.env.EVENTS_REDIS_HOST ?? 'localhost',
+      port: Number(process.env.EVENTS_REDIS_PORT ?? 6380),
+      password:
+        process.env.EVENTS_REDIS_PASSWORD ??
+        process.env.MEDPLUM_REDIS_PASSWORD ??
+        'medplum_local_password',
+    },
+  },
 });
 
 export const environmentSchema = Joi.object({
@@ -60,4 +81,33 @@ export const environmentSchema = Joi.object({
       'http://127.0.0.1:3000',
     ].join(','),
   ),
+  MEDPLUM_ENABLED: Joi.boolean().default(false),
+  MEDPLUM_BASE_URL: Joi.string().uri().default('http://localhost:8103/'),
+  // Required together only when the FHIR gateway is switched on, so the
+  // existing dev setup keeps working without any Medplum config present.
+  MEDPLUM_CLIENT_ID: Joi.string().uuid().when('MEDPLUM_ENABLED', {
+    is: true,
+    then: Joi.required(),
+    otherwise: Joi.optional(),
+  }),
+  MEDPLUM_CLIENT_SECRET: Joi.string().when('MEDPLUM_ENABLED', {
+    is: true,
+    then: Joi.required(),
+    otherwise: Joi.optional(),
+  }),
+  MEDPLUM_PROJECT_ID: Joi.string().uuid().when('MEDPLUM_ENABLED', {
+    is: true,
+    then: Joi.required(),
+    otherwise: Joi.optional(),
+  }),
+  EVENTS_ENABLED: Joi.boolean().default(false),
+  EVENTS_SUBSCRIPTION_SECRET: Joi.string().min(16).when('EVENTS_ENABLED', {
+    is: true,
+    then: Joi.required(),
+    otherwise: Joi.optional(),
+  }),
+  EVENTS_REDIS_HOST: Joi.string().default('localhost'),
+  EVENTS_REDIS_PORT: Joi.number().port().default(6380),
+  EVENTS_REDIS_PASSWORD: Joi.string().optional(),
+  MEDPLUM_REDIS_PASSWORD: Joi.string().optional(),
 });

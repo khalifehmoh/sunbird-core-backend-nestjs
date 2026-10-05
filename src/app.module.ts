@@ -14,6 +14,8 @@ import { RolesModule } from './roles/roles.module';
 import { ModulesModule } from './modules/modules.module';
 import { PermissionsModule } from './permissions/permissions.module';
 import { AuditModule } from './audit/audit.module';
+import { FhirModule } from './fhir/fhir.module';
+import { EventsModule } from './events/events.module';
 
 @Module({
   imports: [
@@ -46,6 +48,8 @@ import { AuditModule } from './audit/audit.module';
     ModulesModule,
     PermissionsModule,
     AuditModule,
+    FhirModule,
+    EventsModule,
   ],
   controllers: [HealthController],
   providers: [{ provide: APP_GUARD, useClass: JwtAuthGuard }],

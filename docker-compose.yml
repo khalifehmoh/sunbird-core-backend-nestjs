@@ -34,6 +34,133 @@ services:
       postgres:
         condition: service_healthy
 
+  # --- Medplum (FHIR clinical data repository) -------------------------------
+  # Medplum is an internal engine, not a second API. Only the `api` service
+  # talks to it; nothing here is published to external callers. It owns its own
+  # Postgres and Redis because it manages its own schema and release lifecycle
+  # independently of the Flyway-owned `core` schema.
+  medplum-postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${MEDPLUM_DB_NAME:-medplum}
+      POSTGRES_USER: ${MEDPLUM_DB_USERNAME:-medplum}
+      POSTGRES_PASSWORD: ${MEDPLUM_DB_PASSWORD:-medplum_local_password}
+    # Command-line args instead of a postgres.conf file. Medplum requires
+    # REPEATABLE READ; the rest mirrors Medplum's reference compose file.
+    command:
+      - "postgres"
+      - "-c"
+      - "listen_addresses=*"
+      - "-c"
+      - "statement_timeout=60000"
+      - "-c"
+      - "default_transaction_isolation=REPEATABLE READ"
+      - "-c"
+      - "shared_preload_libraries=pg_stat_statements,auto_explain"
+    ports:
+      - "${MEDPLUM_DB_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - medplum-postgres:/var/lib/postgresql/data
+
+  medplum-redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${MEDPLUM_REDIS_PASSWORD:-medplum_local_password}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "redis-cli",
+          "-a",
+          "${MEDPLUM_REDIS_PASSWORD:-medplum_local_password}",
+          "ping",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - medplum-redis:/data
+    ports:
+      # Host access for Nest BullMQ (same Redis Medplum already runs).
+      - "${MEDPLUM_REDIS_PORT:-6380}:6379"
+
+  medplum-server:
+    image: medplum/medplum-server:5.1.37
+    command: ["env"]
+    environment:
+      MEDPLUM_PORT: 8103
+      MEDPLUM_BASE_URL: "http://localhost:8103/"
+      MEDPLUM_APP_BASE_URL: "http://localhost:3001/"
+      MEDPLUM_STORAGE_BASE_URL: "http://localhost:8103/storage/"
+      MEDPLUM_BINARY_STORAGE: "file:./binary/"
+      MEDPLUM_DATABASE_HOST: medplum-postgres
+      MEDPLUM_DATABASE_PORT: 5432
+      MEDPLUM_DATABASE_DBNAME: ${MEDPLUM_DB_NAME:-medplum}
+      MEDPLUM_DATABASE_USERNAME: ${MEDPLUM_DB_USERNAME:-medplum}
+      MEDPLUM_DATABASE_PASSWORD: ${MEDPLUM_DB_PASSWORD:-medplum_local_password}
+      MEDPLUM_REDIS_HOST: medplum-redis
+      MEDPLUM_REDIS_PORT: 6379
+      MEDPLUM_REDIS_PASSWORD: ${MEDPLUM_REDIS_PASSWORD:-medplum_local_password}
+      # Seeded on first boot only (see packages/server/src/seed.ts upstream):
+      # when both client id and secret are set, Medplum creates a matching
+      # ClientApplication, so no interactive login is needed to bootstrap.
+      MEDPLUM_DEFAULT_SUPER_ADMIN_EMAIL: ${MEDPLUM_SUPER_ADMIN_EMAIL:-admin@sunbird.local}
+      MEDPLUM_DEFAULT_SUPER_ADMIN_PASSWORD: ${MEDPLUM_SUPER_ADMIN_PASSWORD:-medplum_local_admin}
+      MEDPLUM_DEFAULT_SUPER_ADMIN_CLIENT_ID: ${MEDPLUM_SUPER_ADMIN_CLIENT_ID:-209d6772-7c4c-46d6-bb98-51fb24d41edb}
+      MEDPLUM_DEFAULT_SUPER_ADMIN_CLIENT_SECRET: ${MEDPLUM_SUPER_ADMIN_CLIENT_SECRET:-f794e61944c87470475dbc1b7546be030d6ba3d71394a733b44d19815979f032}
+      # Only the optional Medplum admin app (profile `medplum-admin`) is a
+      # browser client of Medplum. The Sunbird frontend goes through the API.
+      MEDPLUM_ALLOWED_ORIGINS: "http://localhost:3001"
+      # @medplum/react resolves FHIR StructureDefinitions over $graphql.
+      MEDPLUM_INTROSPECTION_ENABLED: "true"
+      MEDPLUM_VM_CONTEXT_BOTS_ENABLED: "true"
+      MEDPLUM_DEFAULT_BOT_RUNTIME_VERSION: "vmcontext"
+      # Local spike: Nest webhook is http://host.docker.internal:8080 (SSRF guard
+      # otherwise skips non-HTTPS / private-network rest-hook Subscriptions).
+      MEDPLUM_ALLOW_UNSAFE_OUTBOUND: "true"
+      MEDPLUM_MAX_JSON_SIZE: "1mb"
+      MEDPLUM_MAX_BATCH_SIZE: "50mb"
+      MEDPLUM_SHUTDOWN_TIMEOUT_MILLISECONDS: 30000
+    ports:
+      - "${MEDPLUM_PORT:-8103}:8103"
+    depends_on:
+      medplum-postgres:
+        condition: service_healthy
+      medplum-redis:
+        condition: service_healthy
+    healthcheck:
+      # The image ships without curl/wget, so use Node's fetch.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:8103/healthcheck').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      # First boot seeds StructureDefinitions/ValueSets/SearchParameters and
+      # takes a few minutes, hence the long start period.
+      start_period: 300s
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    volumes:
+      - medplum-binary:/usr/src/medplum/packages/server/binary
+
+  # Medplum's own admin console. Opt-in for debugging FHIR data directly
+  # (`docker compose --profile medplum-admin up`); never part of the product UI.
+  medplum-app:
+    image: medplum/medplum-app:5.1.37
+    profiles: ["medplum-admin"]
+    ports:
+      - "${MEDPLUM_APP_PORT:-3001}:3000"
+    depends_on:
+      medplum-server:
+        condition: service_healthy
+
   api:
     build: .
     environment:
@@ -51,11 +178,18 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       COOKIE_SAME_SITE: ${COOKIE_SAME_SITE:-lax}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000}
+      MEDPLUM_ENABLED: ${MEDPLUM_ENABLED:-true}
+      MEDPLUM_BASE_URL: http://medplum-server:8103/
+      MEDPLUM_CLIENT_ID: ${MEDPLUM_CLIENT_ID:-cf8609dd-b80e-4ecf-82ff-61d07c0fed22}
+      MEDPLUM_CLIENT_SECRET: ${MEDPLUM_CLIENT_SECRET:-ccb80fb669cd66705fa1dbd23168dacc109f87cd6832bb8781f31d1893b09506}
+      MEDPLUM_PROJECT_ID: ${MEDPLUM_PROJECT_ID:-57e5cf20-efef-4ec0-beef-95c25e13525f}
     ports:
       - "${PORT:-8080}:8080"
     depends_on:
       flyway:
         condition: service_completed_successfully
+      medplum-server:
+        condition: service_healthy
     healthcheck:
       test:
         [
@@ -70,3 +204,6 @@ services:
 
 volumes:
   sunbird-postgres:
+  medplum-postgres:
+  medplum-redis:
+  medplum-binary:

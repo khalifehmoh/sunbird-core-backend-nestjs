@@ -33,7 +33,7 @@ that two people feel disproportionately.
 |---|---|---|---|
 | Kafka client in `@nestjs/microservices` | **Real — and at 2 engineers, defer Kafka entirely** | `Transport.KAFKA` wraps `kafkajs`, which has had no release since Feb 2023 ([tulios/kafkajs#1603](https://github.com/tulios/kafkajs/issues/1603)); separately, a Kafka cluster is a heavy fixed operational tax for a 2-person team | Start event-driven work with Medplum Subscriptions/Bots plus BullMQ on the Redis instance Medplum already requires — zero additional infrastructure. Adopt Kafka only when a measured need for ordered, replayable, multi-consumer streams appears, and when that day comes use a managed Kafka (e.g. Confluent Cloud/MSK) with `@confluentinc/kafka-javascript` via a custom transport. Never ship the default `kafkajs` dependency into a clinical event pipeline. |
 | FHIR server/validation maturity | **Closed by Medplum, and a strong fit for this frontend specifically** | Medplum is a full-stack, open-source (Apache-2.0), **TypeScript** FHIR server (Node/Express/Postgres/Redis) with SMART-on-FHIR auth, SOC2 Type 2, and a HIPAA-oriented design — a production CDR used by real healthcare orgs, not a toy client library. `@medplum/react` (the FHIR-aware component library: patient search, resource timelines, forms, questionnaires, scheduling) is built directly on **Mantine v8** — the same UI library already used on the frontend — and `@medplum/react-hooks`'s `useSubscription` gives live-updating UI (e.g. an ICU vitals card) on a FHIR resource change with almost no custom code | Two viable paths, decide per module: (1) self-host Medplum as the clinical data repository and UI-component source, and keep this NestJS service as the admin/org/auth layer around it, or (2) use `@medplum/core`/`fhir-kit-client` inside this service for typed FHIR resources and validation without running the full Medplum stack. Given the Mantine overlap, option (1) is worth prioritizing for the patient-management/ICU screens specifically. No Java/HAPI dependency is required either way. |
-| Event automation (react to new/updated clinical data) | **Partly closed by Medplum Bots** | Medplum "Bots" are serverless TypeScript functions triggered by FHIR Subscriptions (webhook-style, on resource create/update), cron schedules, or direct API calls — covers a lot of "when X happens, do Y" event-driven needs (HL7-to-FHIR conversion, notifications, PDF generation, calling third-party APIs) without any Kafka setup | Use Bots for single-hop reactions to clinical data changes. Bots are not a substitute for Kafka if/when true ordered, multi-consumer event streaming is needed across services — keep the Kafka action item below for that case, and treat Bots and Kafka as complementary, not either/or. |
+| Event automation (react to new/updated clinical data) | **Closed for single-hop reactions (spike 1)** | Medplum Bots + Nest BullMQ on Medplum Redis both delivered the same discharge notification in the local demo — see [`events-spike-findings.md`](./events-spike-findings.md) | Prefer Bots for FHIR-local side effects; BullMQ when Nest/outbound providers are required. Kafka still deferred until ordered multi-consumer streams are measured. |
 | Complex multi-step workflows / sagas (admission → triage → bed assignment → discharge, with compensation) | **Closed in stages — FHIR `Task` first, Temporal when complexity demands** | FHIR has a native `Task` resource designed for workflow tracking, and Medplum supports it first-class; that plus Bots carries early patient-management workflows with zero new infrastructure. Temporal's TypeScript SDK (durable sagas, ordered compensation, retries) is the graduation path — the piece Spring would otherwise win on via Spring State Machine / Camunda | Model early workflows as FHIR `Task` state transitions driven by Bots. Adopt Temporal only when a pathway genuinely needs compensation-on-failure across multiple side-effecting steps — and at this team size prefer Temporal Cloud over self-hosting a Temporal cluster. Don't hand-roll saga logic in application code, and don't stretch a chain of Bots into a saga. |
 | ICU real-time data (bedside monitors, vitals streaming, alarms) | **Good fit, needs a spike** | Node's event loop is strong at many-concurrent-low-CPU-per-message connections (exactly what per-bed vitals streams look like); NestJS Gateways (WebSocket)/MQTT transport, or Medplum's `useSubscription` hook for the UI-facing side, are the natural fit | Prototype with a realistic concurrent-bed count and message rate, and deliberately inject one CPU-bound step (e.g. threshold/alarm evaluation) to confirm it doesn't stall the event loop; move any true CPU-bound work to `worker_threads` or a separate queue consumer if it does. |
 | Legacy device/HL7v2 (MLLP), DICOM (imaging), ASTM (lab instruments) interfacing | **Closed by the Medplum Agent** | The **Medplum Agent** is a lightweight, open-source (Apache-2.0), actively maintained service that runs inside the hospital network and bridges HL7v2/MLLP, DICOM, and ASTM to the cloud over secure HTTPS WebSockets — Medplum positions this explicitly as the modern, cloud-native replacement for Mirth Connect following Mirth's move to a commercial license. The device-specific message mapping (see note below) still runs as a TypeScript Bot; the Agent only handles secure protocol bridging, so nobody on the team needs to write Java or operate a full legacy interface engine | Prefer the Medplum Agent over hand-rolling `node-hl7-client`/`node-hl7-server`/`@cosyte/mllp` once Medplum is in the stack for FHIR anyway — it is purpose-built, covers DICOM/ASTM in addition to HL7v2, and is actively maintained. **Reminder from the HL7-adapters discussion:** the Agent does not eliminate the need to map each device's specific message fields by hand — that work is inherent to HL7v2 in any stack — it eliminates the need to build/secure the network bridge and removes the Java dependency entirely. |
@@ -115,8 +115,15 @@ of all the same categories of ongoing work above.
 Run these as short, throwaway spikes, not production code, before building the real
 patient-management/ICU modules on top of these choices:
 
-1. **Event-driven spike**: one clinical reaction implemented twice — as a Medplum Bot on a Subscription, and as a BullMQ job on Medplum's Redis — to establish which pattern fits which class of event. No Kafka in this spike; it enters only via the revisit trigger below.
-2. **FHIR + UI spike**: add Medplum's server to this repo's `docker-compose.yml`, model `Patient`, `Encounter`, and `Observation`, call it from a NestJS service via `@medplum/core` proxied under `/api/v1/...`, and build one real patient-management screen with `@medplum/react` against the existing Mantine theme — confirming both that the UI looks native and that no external caller ever needs to know Medplum exists as a separate service.
+> Spikes 1 and 2 are done; spike 5 is half done — results in
+> [`events-spike-findings.md`](./events-spike-findings.md) and
+> [`medplum-spike-findings.md`](./medplum-spike-findings.md). The decision below
+> stands; the one thing that changed is that per-tenant `AccessPolicy` (the rest
+> of spike 5) is now a prerequisite for the real module rather than a later
+> refinement.
+
+1. **Event-driven spike** ✅: one clinical reaction implemented twice — as a Medplum Bot on a Subscription, and as a BullMQ job on Medplum's Redis — to establish which pattern fits which class of event. No Kafka in this spike; it enters only via the revisit trigger below. Findings: [`events-spike-findings.md`](./events-spike-findings.md).
+2. **FHIR + UI spike** ✅: add Medplum's server to this repo's `docker-compose.yml`, model `Patient`, `Encounter`, and `Observation`, call it from a NestJS service via `@medplum/core` proxied under `/api/v1/...`, and build one real patient-management screen with `@medplum/react` against the existing Mantine theme — confirming both that the UI looks native and that no external caller ever needs to know Medplum exists as a separate service.
 3. **ICU real-time spike**: a WebSocket/MQTT gateway (or Medplum's `useSubscription`) simulating concurrent bedside streams at a realistic bed count and sample rate, load-tested with a deliberately CPU-heavy step included, to confirm event-loop behavior under load.
 4. **Device bridge spike**: configure a Medplum Agent endpoint for one real device type (HL7v2/MLLP or DICOM), write the minimal Bot that accepts and acknowledges it, and confirm the message-mapping effort matches expectations from the HL7-adapters discussion.
 5. **Auth-seam spike**: decide and prototype how Sunbird's existing JWT/cookie auth and Medplum's auth model relate for the same clinical-app users, before real patient data flows through both systems.
@@ -140,16 +147,21 @@ open it directly in a browser to share with the team.
 
 ## Prompt to resume
 
-Next step agreed but not started: the Medplum spike, on its own branch, with the
-ICU real-time spike explicitly out of scope for now.
+The FHIR + UI spike and the event-driven (Bots + BullMQ) spike are finished
+(see [`medplum-spike-findings.md`](./medplum-spike-findings.md) and
+[`events-spike-findings.md`](./events-spike-findings.md)). Remaining priority:
 
 ```text
-Run the Medplum de-risking spike from @docs/backend-stack-decision.md on a new branch.
-Scope: spikes 2 (FHIR + UI), 4 (device bridge), 5 (auth seam) — skip the ICU real-time spike.
-Add the Medplum server + its Postgres/Redis to docker-compose.yml.
-Call Medplum from a NestJS module via @medplum/core, proxied under /api/v1 — Medplum stays internal.
-Build one React page using @medplum/react on the existing Mantine theme (frontend repo).
-Keep Sunbird's existing JWT/cookie auth as the single source of truth; Medplum trusts it.
-Flyway stays the authority for the core schema; Medplum owns its own schema separately.
-Throwaway spike code — evaluate fit, do not build the real patient-management module yet.
+Finish the auth-seam spike (5) from @docs/medplum-spike-findings.md, continuing on the spike branch.
+Configure Medplum to trust Sunbird-issued JWTs as an external identity provider, with one
+Medplum identity per user and an AccessPolicy per tenant. Then move the tenant checks out of
+src/fhir/tenant-scope.ts and confirm the $graphql tenant-isolation hole is closed.
+This is the prerequisite for building the real patient-management module.
+```
+
+```text
+Run the device-bridge spike (4) from @docs/backend-stack-decision.md.
+Configure a Medplum Agent endpoint for one device type (HL7v2/MLLP or DICOM), write the minimal
+Bot that accepts and acknowledges a message, and compare the mapping effort against the
+expectations in the HL7-adapters discussion.
 ```
