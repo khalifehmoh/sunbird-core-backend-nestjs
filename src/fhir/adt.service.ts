@@ -6,6 +6,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import type {
+  Bundle,
+  BundleEntry,
   Encounter,
   Location,
   Organization,
@@ -33,6 +35,13 @@ import type {
   RegisterVisitRequestDto,
   TransferRequestDto,
 } from './dto/adt.dto';
+import {
+  createEntry,
+  isConcurrentModification,
+  resultAt,
+  updateEntry,
+} from './fhir-transaction';
+import { KeyedMutex } from './keyed-mutex';
 import { systemActor, type MedplumActor } from './medplum-actor';
 import { MedplumRegistry } from './medplum-registry';
 import { MedplumService } from './medplum.service';
@@ -43,9 +52,17 @@ import { MedplumService } from './medplum.service';
  * HL7 event codes (A01–A05) are recorded as tags for traceability; the
  * authoritative clinical state is the Encounter itself. Bed occupancy is
  * enforced here so two concurrent admits cannot claim the same bed.
+ *
+ * Every action that touches more than one resource (the Encounter and the
+ * bed Location, or a pre-admission and its replacement) is sent as a single
+ * FHIR transaction, so a failure leaves nothing half-written. The resources
+ * are guarded with the versions that were read (`If-Match`), and the
+ * check-then-write section runs one request at a time per tenant.
  */
 @Injectable()
 export class AdtService {
+  private readonly writers = new KeyedMutex();
+
   constructor(
     private readonly medplum: MedplumService,
     private readonly registry: MedplumRegistry,
@@ -55,156 +72,151 @@ export class AdtService {
     dto: AdmitRequestDto,
     actor: MedplumActor,
   ): Promise<EncounterResponseDto> {
-    await this.readPatient(dto.patientId, actor);
-    await this.assertNoActiveInpatient(dto.patientId, actor);
-    const bed = await this.readBed(dto.bedLocationId, actor);
-    await this.assertBedFree(bed, actor);
-
-    if (dto.attendingPractitionerId) {
-      await this.readPractitioner(dto.attendingPractitionerId, actor);
-    }
-
-    const visitNumber =
-      dto.visitNumber ?? (await this.nextVisitNumber(actor, 'IP'));
-    const organization = await this.findServiceProvider(actor);
-    const encounter = toAdmitEncounter(
-      dto,
-      visitNumber,
-      bed.name ?? bed.id ?? dto.bedLocationId,
-      organization,
-    );
-
-    const client = this.medplum.getClient(actor);
-    const created = await client.createResource(encounter);
-    await this.setBedOccupancy(bed, true, actor);
-    return toEncounterResponse(created);
+    return this.serialized(actor, async () => {
+      const entries = await this.planAdmit(dto, actor);
+      const result = await this.commit(actor, entries);
+      return toEncounterResponse(await this.resource(result, 0, actor));
+    });
   }
 
   async register(
     dto: RegisterVisitRequestDto,
     actor: MedplumActor,
   ): Promise<EncounterResponseDto> {
-    await this.readPatient(dto.patientId, actor);
-    let locationDisplay: string | undefined;
-    if (dto.locationId) {
-      const location = await this.readLocation(dto.locationId, actor);
-      locationDisplay = location.name ?? location.id;
-    }
-    if (dto.attendingPractitionerId) {
-      await this.readPractitioner(dto.attendingPractitionerId, actor);
-    }
+    return this.serialized(actor, async () => {
+      await this.readPatient(dto.patientId, actor);
+      let locationDisplay: string | undefined;
+      if (dto.locationId) {
+        const location = await this.readLocation(dto.locationId, actor);
+        locationDisplay = location.name ?? location.id;
+      }
+      if (dto.attendingPractitionerId) {
+        await this.readPractitioner(dto.attendingPractitionerId, actor);
+      }
 
-    const prefix = dto.patientClass === 'EMER' ? 'ED' : 'OP';
-    const visitNumber =
-      dto.visitNumber ?? (await this.nextVisitNumber(actor, prefix));
-    const organization = await this.findServiceProvider(actor);
-    const encounter = toRegisterEncounter(
-      dto,
-      visitNumber,
-      locationDisplay,
-      organization,
-    );
+      const prefix = dto.patientClass === 'EMER' ? 'ED' : 'OP';
+      const visitNumber =
+        dto.visitNumber ?? (await this.nextVisitNumber(actor, prefix));
+      const organization = await this.findServiceProvider(actor);
+      const encounter = toRegisterEncounter(
+        dto,
+        visitNumber,
+        locationDisplay,
+        organization,
+      );
 
-    const client = this.medplum.getClient(actor);
-    const created = await client.createResource(encounter);
-    return toEncounterResponse(created);
+      const client = this.medplum.getClient(actor);
+      const created = await client.createResource(encounter);
+      return toEncounterResponse(created);
+    });
   }
 
   async transfer(
     dto: TransferRequestDto,
     actor: MedplumActor,
   ): Promise<EncounterResponseDto> {
-    const encounter = await this.readEncounter(dto.encounterId, actor);
-    if (encounter.status !== 'in-progress' || encounter.class?.code !== 'IMP') {
-      throw new BadRequestException(
-        'Only an active inpatient encounter can be transferred',
+    return this.serialized(actor, async () => {
+      const encounter = await this.readEncounter(dto.encounterId, actor);
+      if (
+        encounter.status !== 'in-progress' ||
+        encounter.class?.code !== 'IMP'
+      ) {
+        throw new BadRequestException(
+          'Only an active inpatient encounter can be transferred',
+        );
+      }
+
+      const bed = await this.readBed(dto.bedLocationId, actor);
+      await this.assertBedFree(bed, actor, encounter.id);
+
+      if (dto.attendingPractitionerId) {
+        await this.readPractitioner(dto.attendingPractitionerId, actor);
+      }
+
+      const previousBedId = this.activeLocationId(encounter);
+      const previousBed =
+        previousBedId && previousBedId !== bed.id
+          ? await this.findBed(previousBedId, actor)
+          : undefined;
+      const updated = applyTransfer(
+        encounter,
+        dto,
+        bed.name ?? bed.id ?? dto.bedLocationId,
       );
-    }
 
-    const bed = await this.readBed(dto.bedLocationId, actor);
-    await this.assertBedFree(bed, actor, encounter.id);
+      const entries: BundleEntry[] = [updateEntry(updated)];
+      if (previousBed) {
+        entries.push(updateEntry(this.withOccupancy(previousBed, false)));
+      }
+      entries.push(updateEntry(this.withOccupancy(bed, true)));
 
-    if (dto.attendingPractitionerId) {
-      await this.readPractitioner(dto.attendingPractitionerId, actor);
-    }
-
-    const previousBedId = this.activeLocationId(encounter);
-    const updated = applyTransfer(
-      encounter,
-      dto,
-      bed.name ?? bed.id ?? dto.bedLocationId,
-    );
-
-    const client = this.medplum.getClient(actor);
-    const saved = await client.updateResource(updated);
-
-    if (previousBedId && previousBedId !== dto.bedLocationId) {
-      const previous = await this.readLocation(previousBedId, actor);
-      await this.setBedOccupancy(previous, false, actor);
-    }
-    await this.setBedOccupancy(bed, true, actor);
-    return toEncounterResponse(saved);
+      const result = await this.commit(actor, entries);
+      return toEncounterResponse(await this.resource(result, 0, actor));
+    });
   }
 
   async discharge(
     dto: DischargeRequestDto,
     actor: MedplumActor,
   ): Promise<EncounterResponseDto> {
-    const encounter = await this.readEncounter(dto.encounterId, actor);
-    if (encounter.status === 'finished' || encounter.status === 'cancelled') {
-      throw new BadRequestException('Encounter is already closed');
-    }
-    if (encounter.class?.code !== 'IMP') {
-      throw new BadRequestException(
-        'Discharge (A03) applies to inpatient encounters; finish OPD/ED via status update',
-      );
-    }
-
-    if (dto.attendingPractitionerId) {
-      await this.readPractitioner(dto.attendingPractitionerId, actor);
-    }
-
-    const bedId = this.activeLocationId(encounter);
-    const updated = applyDischarge(encounter, dto);
-    const client = this.medplum.getClient(actor);
-    const saved = await client.updateResource(updated);
-
-    if (bedId) {
-      const bed = await this.readLocation(bedId, actor);
-      if (this.isBed(bed)) {
-        await this.setBedOccupancy(bed, false, actor);
+    return this.serialized(actor, async () => {
+      const encounter = await this.readEncounter(dto.encounterId, actor);
+      if (encounter.status === 'finished' || encounter.status === 'cancelled') {
+        throw new BadRequestException('Encounter is already closed');
       }
-    }
-    return toEncounterResponse(saved);
+      if (encounter.class?.code !== 'IMP') {
+        throw new BadRequestException(
+          'Discharge (A03) applies to inpatient encounters; finish OPD/ED via status update',
+        );
+      }
+
+      if (dto.attendingPractitionerId) {
+        await this.readPractitioner(dto.attendingPractitionerId, actor);
+      }
+
+      const bedId = this.activeLocationId(encounter);
+      const bed = bedId ? await this.findBed(bedId, actor) : undefined;
+      const updated = applyDischarge(encounter, dto);
+
+      const entries: BundleEntry[] = [updateEntry(updated)];
+      if (bed) {
+        entries.push(updateEntry(this.withOccupancy(bed, false)));
+      }
+
+      const result = await this.commit(actor, entries);
+      return toEncounterResponse(await this.resource(result, 0, actor));
+    });
   }
 
   async preadmit(
     dto: PreadmitRequestDto,
     actor: MedplumActor,
   ): Promise<EncounterResponseDto> {
-    await this.readPatient(dto.patientId, actor);
-    let wardDisplay: string | undefined;
-    if (dto.wardLocationId) {
-      const ward = await this.readLocation(dto.wardLocationId, actor);
-      wardDisplay = ward.name ?? ward.id;
-    }
-    if (dto.attendingPractitionerId) {
-      await this.readPractitioner(dto.attendingPractitionerId, actor);
-    }
+    return this.serialized(actor, async () => {
+      await this.readPatient(dto.patientId, actor);
+      let wardDisplay: string | undefined;
+      if (dto.wardLocationId) {
+        const ward = await this.readLocation(dto.wardLocationId, actor);
+        wardDisplay = ward.name ?? ward.id;
+      }
+      if (dto.attendingPractitionerId) {
+        await this.readPractitioner(dto.attendingPractitionerId, actor);
+      }
 
-    const visitNumber =
-      dto.visitNumber ?? (await this.nextVisitNumber(actor, 'PA'));
-    const organization = await this.findServiceProvider(actor);
-    const encounter = toPreadmitEncounter(
-      dto,
-      visitNumber,
-      wardDisplay,
-      organization,
-    );
+      const visitNumber =
+        dto.visitNumber ?? (await this.nextVisitNumber(actor, 'PA'));
+      const organization = await this.findServiceProvider(actor);
+      const encounter = toPreadmitEncounter(
+        dto,
+        visitNumber,
+        wardDisplay,
+        organization,
+      );
 
-    const client = this.medplum.getClient(actor);
-    const created = await client.createResource(encounter);
-    return toEncounterResponse(created);
+      const client = this.medplum.getClient(actor);
+      const created = await client.createResource(encounter);
+      return toEncounterResponse(created);
+    });
   }
 
   async convertPreadmitToAdmit(
@@ -212,21 +224,26 @@ export class AdtService {
     dto: Omit<AdmitRequestDto, 'patientId'>,
     actor: MedplumActor,
   ): Promise<EncounterResponseDto> {
-    const planned = await this.readEncounter(encounterId, actor);
-    if (planned.status !== 'planned' || planned.class?.code !== 'IMP') {
-      throw new BadRequestException(
-        'Only a planned inpatient pre-admission can convert to A01',
-      );
-    }
-    const patientId = planned.subject?.reference?.replace(/^Patient\//, '');
-    if (!patientId) {
-      throw new BadRequestException('Pre-admission has no patient');
-    }
+    return this.serialized(actor, async () => {
+      const planned = await this.readEncounter(encounterId, actor);
+      if (planned.status !== 'planned' || planned.class?.code !== 'IMP') {
+        throw new BadRequestException(
+          'Only a planned inpatient pre-admission can convert to A01',
+        );
+      }
+      const patientId = planned.subject?.reference?.replace(/^Patient\//, '');
+      if (!patientId) {
+        throw new BadRequestException('Pre-admission has no patient');
+      }
 
-    const admitted = await this.admit({ ...dto, patientId }, actor);
-    const client = this.medplum.getClient(actor);
-    await client.updateResource({ ...planned, status: 'cancelled' as const });
-    return admitted;
+      // One transaction: the admission is created, the bed is taken and the
+      // pre-admission is cancelled together, or none of it happens.
+      const entries = await this.planAdmit({ ...dto, patientId }, actor);
+      entries.push(updateEntry({ ...planned, status: 'cancelled' as const }));
+
+      const result = await this.commit(actor, entries);
+      return toEncounterResponse(await this.resource(result, 0, actor));
+    });
   }
 
   async getEncounter(
@@ -272,6 +289,98 @@ export class AdtService {
         occupiedByEncounterId: occupancy.get(node.id) ?? null,
       })),
     };
+  }
+
+  /**
+   * Validates an A01 and returns its transaction entries: the new inpatient
+   * Encounter (always index 0) and the bed it occupies. Callers add whatever
+   * else must commit with it and send the lot through {@link commit}.
+   */
+  private async planAdmit(
+    dto: AdmitRequestDto,
+    actor: MedplumActor,
+  ): Promise<BundleEntry[]> {
+    await this.readPatient(dto.patientId, actor);
+    await this.assertNoActiveInpatient(dto.patientId, actor);
+    const bed = await this.readBed(dto.bedLocationId, actor);
+    await this.assertBedFree(bed, actor);
+
+    if (dto.attendingPractitionerId) {
+      await this.readPractitioner(dto.attendingPractitionerId, actor);
+    }
+
+    const visitNumber =
+      dto.visitNumber ?? (await this.nextVisitNumber(actor, 'IP'));
+    const organization = await this.findServiceProvider(actor);
+    const encounter = toAdmitEncounter(
+      dto,
+      visitNumber,
+      bed.name ?? bed.id ?? dto.bedLocationId,
+      organization,
+    );
+
+    return [createEntry(encounter), updateEntry(this.withOccupancy(bed, true))];
+  }
+
+  /**
+   * One ADT action at a time per tenant. The checks (bed free, no active
+   * stay, next visit number) and the write that depends on them must not
+   * interleave with another request doing the same.
+   */
+  private serialized<T>(
+    actor: MedplumActor,
+    task: () => Promise<T>,
+  ): Promise<T> {
+    return this.writers.run(actor.tenantId, task);
+  }
+
+  /**
+   * Sends the entries as one FHIR transaction as the caller. Medplum applies
+   * all of them or none. A guarded resource that changed since it was read
+   * (someone else took the bed, or already discharged the stay) surfaces as
+   * a 409 so the client can reload instead of overwriting.
+   */
+  private async commit(
+    actor: MedplumActor,
+    entries: BundleEntry[],
+  ): Promise<Bundle> {
+    try {
+      return await this.medplum.getClient(actor).executeBatch({
+        resourceType: 'Bundle',
+        type: 'transaction',
+        entry: entries,
+      });
+    } catch (error) {
+      if (isConcurrentModification(error)) {
+        throw new ConflictException(
+          'The bed or encounter changed while this request was being processed. Reload and try again.',
+        );
+      }
+      throw error;
+    }
+  }
+
+  /** The Encounter at `index` of a transaction response. */
+  private async resource(
+    result: Bundle,
+    index: number,
+    actor: MedplumActor,
+  ): Promise<Encounter> {
+    const inline = resultAt<Encounter>(result, index);
+    if (inline) return inline;
+
+    const id =
+      result.entry?.[index]?.response?.location?.match(
+        /Encounter\/([^/]+)/,
+      )?.[1];
+    if (!id) {
+      throw new Error('FHIR transaction did not return the Encounter');
+    }
+    return this.readEncounter(id, actor);
+  }
+
+  private withOccupancy(bed: Location, occupied: boolean): Location {
+    return { ...bed, operationalStatus: bedOperationalStatus(occupied) };
   }
 
   /**
@@ -332,18 +441,6 @@ export class AdtService {
     }
   }
 
-  private async setBedOccupancy(
-    bed: Location,
-    occupied: boolean,
-    actor: MedplumActor,
-  ): Promise<void> {
-    const client = this.medplum.getClient(actor);
-    await client.updateResource({
-      ...bed,
-      operationalStatus: bedOperationalStatus(occupied),
-    });
-  }
-
   private activeLocationId(encounter: Encounter): string | undefined {
     const active = encounter.location?.find(
       (entry) => entry.status === 'active',
@@ -396,6 +493,25 @@ export class AdtService {
       throw new BadRequestException('Selected location is not a bed');
     }
     return location;
+  }
+
+  /**
+   * The bed an encounter is leaving, if the caller can still see it. A stay
+   * must remain closable or transferable when its previous bed has been
+   * retired or moved out of the caller's branch, so a missing bed means
+   * "nothing to free" rather than a failure.
+   */
+  private async findBed(
+    id: string,
+    actor: MedplumActor,
+  ): Promise<Location | undefined> {
+    try {
+      const location = await this.readLocation(id, actor);
+      return this.isBed(location) ? location : undefined;
+    } catch (error) {
+      if (error instanceof NotFoundException) return undefined;
+      throw error;
+    }
   }
 
   /** The caller's branch `Organization` (or the tenant root) as `serviceProvider`. */

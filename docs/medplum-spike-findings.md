@@ -233,10 +233,17 @@ pass**, including the five bypasses from
 - The admit, transfer and discharge flow and both notification paths (Bot and
   BullMQ) still work end to end per tenant.
 
+The frontend `clinical` routes, sidebar links and in-page actions are now
+gated on the same codes (`ClinicalAccess` in
+`sunbird-frontend/src/constants/permissions.ts`): read for every screen,
+read + create for admit, register, pre-admit and new patient, read + update
+for transfer, discharge and editing a patient. That is presentation only; the
+API still answers 403 on its own.
+
 **Still open**: tenant-wide roles beyond the single branch (a user with no
 valid default branch gets no clinical access rather than tenant-wide access),
-the role-to-policy catalogue, enabling `AuditEvent`, `getProfile()`, frontend
-`clinical` route gating, and the production sync between `core` and Medplum.
+the role-to-policy catalogue, enabling `AuditEvent`, `getProfile()`, and the
+production sync between `core` and Medplum.
 
 ## Spike 5 plan: Project per tenant + On-Behalf-Of
 
