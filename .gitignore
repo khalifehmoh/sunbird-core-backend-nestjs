@@ -5,6 +5,8 @@ coverage/
 .env.*
 !.env.example
 LOCAL_CREDENTIALS.md
+# Medplum tenant registry: per-tenant client secrets written by medplum:provision
+.medplum/
 npm-debug.log*
 *.tsbuildinfo
 .idea/
