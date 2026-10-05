@@ -1,6 +1,7 @@
 import { ForbiddenException } from '@nestjs/common';
 import type { Response } from 'express';
 import type { User } from '../database/entities/user.entity';
+import type { MedplumActor } from './medplum-actor';
 import { FhirGatewayController } from './fhir-gateway.controller';
 import type { FhirRequest, MedplumService } from './medplum.service';
 
@@ -22,15 +23,17 @@ function user(permissions: string[], tenantId: string | null = 'tenant-a') {
 }
 
 describe('FhirGatewayController', () => {
-  let request: jest.Mock;
+  let request: jest.Mock<Promise<unknown>, [MedplumActor, FhirRequest]>;
   let controller: FhirGatewayController;
 
   beforeEach(() => {
-    request = jest.fn().mockResolvedValue({
-      status: 200,
-      contentType: 'application/fhir+json',
-      body: '{"resourceType":"Bundle"}',
-    });
+    request = jest
+      .fn<Promise<unknown>, [MedplumActor, FhirRequest]>()
+      .mockResolvedValue({
+        status: 200,
+        contentType: 'application/fhir+json',
+        body: '{"resourceType":"Bundle"}',
+      });
     const medplum = {
       request,
       fhirBaseUrl: 'http://medplum.test/fhir/R4/',
@@ -50,16 +53,14 @@ describe('FhirGatewayController', () => {
   ) {
     const sent: { status?: number; body?: string } = {};
     const res = {
-      status(code: number) {
+      status: (code: number) => {
         sent.status = code;
-        return this;
+        return res;
       },
-      type() {
-        return this;
-      },
-      send(payload: string) {
+      type: () => res,
+      send: (payload: string) => {
         sent.body = payload;
-        return this;
+        return res;
       },
     } as unknown as Response;
     const req = {
@@ -75,8 +76,7 @@ describe('FhirGatewayController', () => {
     return sent;
   }
 
-  const forwarded = (): FhirRequest[] =>
-    request.mock.calls.map((c) => c[1] as FhirRequest);
+  const forwarded = (): FhirRequest[] => request.mock.calls.map((c) => c[1]);
 
   it('delegates reads to the caller, not to a shared account', async () => {
     await call('GET', '/R4/Patient?name=ali', ['Patient']);
@@ -130,7 +130,9 @@ describe('FhirGatewayController', () => {
       tenant: null,
     });
     expect(sent.status).toBe(403);
-    expect(JSON.parse(sent.body ?? '{}').resourceType).toBe('OperationOutcome');
+    expect(
+      (JSON.parse(sent.body ?? '{}') as { resourceType?: string }).resourceType,
+    ).toBe('OperationOutcome');
     expect(request).not.toHaveBeenCalled();
   });
 
@@ -140,7 +142,10 @@ describe('FhirGatewayController', () => {
     );
     const sent = await call('GET', '/R4/Patient', ['Patient']);
     expect(sent.status).toBe(403);
-    expect(JSON.parse(sent.body ?? '{}').issue[0].code).toBe('forbidden');
+    expect(
+      (JSON.parse(sent.body ?? '{}') as { issue: { code: string }[] }).issue[0]
+        .code,
+    ).toBe('forbidden');
   });
 
   describe('permissions', () => {

@@ -19,6 +19,11 @@ const TENANT: MedplumTenant = {
   },
 };
 
+function urlOf(input: string | URL | Request): string {
+  if (typeof input === 'string') return input;
+  return input instanceof URL ? input.href : input.url;
+}
+
 function buildService(enabled = true) {
   const config = {
     get: (key: string) =>
@@ -34,13 +39,16 @@ function buildService(enabled = true) {
 }
 
 describe('MedplumService', () => {
-  let fetchMock: jest.SpyInstance;
+  let fetchMock: jest.SpyInstance<
+    ReturnType<typeof fetch>,
+    Parameters<typeof fetch>
+  >;
 
   beforeEach(() => {
     fetchMock = jest
       .spyOn(globalThis, 'fetch')
       .mockImplementation((input: string | URL | Request) => {
-        const url = String(input);
+        const url = urlOf(input);
         if (url.endsWith('/oauth2/token')) {
           return Promise.resolve(
             new Response(
@@ -60,7 +68,7 @@ describe('MedplumService', () => {
 
   const fhirCalls = () =>
     fetchMock.mock.calls.filter(
-      ([url]) => !String(url).endsWith('/oauth2/token'),
+      ([url]) => !urlOf(url).endsWith('/oauth2/token'),
     );
 
   it('refuses to send anything when the tenant is not provisioned', async () => {
@@ -133,7 +141,7 @@ describe('MedplumService', () => {
     await service.request(actor, { method: 'GET', path: 'Location' });
 
     const logins = fetchMock.mock.calls.filter(([url]) =>
-      String(url).endsWith('/oauth2/token'),
+      urlOf(url).endsWith('/oauth2/token'),
     );
     expect(logins).toHaveLength(1);
     expect(fhirCalls()).toHaveLength(3);
@@ -144,7 +152,7 @@ describe('MedplumService', () => {
     const actor = { tenantId: 'tenant-1', userId: 'user-1' };
     let rejected = false;
     fetchMock.mockImplementation((input: string | URL | Request) => {
-      const url = String(input);
+      const url = urlOf(input);
       if (url.endsWith('/oauth2/token')) {
         return Promise.resolve(
           new Response(

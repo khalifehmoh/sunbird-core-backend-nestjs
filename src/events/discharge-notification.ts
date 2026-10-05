@@ -142,8 +142,5 @@ export function buildDischargeCommunication(
     about: [{ reference: `Encounter/${encounterId}` }],
     sent: demoSms?.sentAt ?? new Date().toISOString(),
     payload,
-    meta: encounter.meta?.tag
-      ? { tag: encounter.meta.tag.filter((t) => t.system?.includes('tenant')) }
-      : undefined,
   };
 }

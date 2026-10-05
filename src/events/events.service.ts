@@ -1,6 +1,7 @@
 import {
   Injectable,
   Logger,
+  NotFoundException,
   OnModuleDestroy,
   OnModuleInit,
   ServiceUnavailableException,
@@ -128,9 +129,20 @@ export class EventsService implements OnModuleInit, OnModuleDestroy {
     encounterId: string,
     actor: MedplumActor,
   ): Promise<Communication[]> {
+    // The caller must be able to see the Encounter (their branch, their
+    // permissions). The notifications are written by the system member and so
+    // carry no branch; they are only reachable through that Encounter.
+    try {
+      await this.medplum
+        .getClient(actor)
+        .readResource('Encounter', encounterId);
+    } catch {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
+
     // Communication has no standard `about` search param in Medplum; look up
     // the two deterministic identifiers the bot/BullMQ writers stamp.
-    const client = this.medplum.getClient(actor);
+    const client = this.medplum.getClient(systemActor(actor.tenantId));
     const paths: Array<'bot' | 'bullmq'> = ['bot', 'bullmq'];
     const found: Communication[] = [];
     for (const path of paths) {

@@ -12,6 +12,7 @@ import {
   ServiceUnavailableException,
   Sse,
   UnauthorizedException,
+  UseGuards,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -24,8 +25,11 @@ import type { Encounter } from '@medplum/fhirtypes';
 import type { Request } from 'express';
 import { Observable } from 'rxjs';
 import { Public } from '../auth/public.decorator';
+import { PermissionsGuard } from '../auth/permissions.guard';
+import { RequirePermissions } from '../auth/require-permissions.decorator';
 import { User } from '../database/entities/user.entity';
 import { actorOf } from '../fhir/medplum-actor';
+import { PATIENT_MGMT_PERMISSIONS } from '../fhir/fhir.constants';
 import { MedplumRegistry } from '../fhir/medplum-registry';
 import { EventsService } from './events.service';
 
@@ -37,6 +41,7 @@ type AuthenticatedRequest = Request & { user: User };
  */
 @ApiTags('events')
 @Controller('events')
+@UseGuards(PermissionsGuard)
 export class EventsController {
   constructor(
     private readonly events: EventsService,
@@ -80,6 +85,7 @@ export class EventsController {
   }
 
   @Get('notifications/:encounterId')
+  @RequirePermissions(PATIENT_MGMT_PERMISSIONS.read)
   @ApiCookieAuth('cookieAuth')
   @ApiOkResponse({
     description: 'Communications written by the bot and/or BullMQ paths.',
@@ -107,6 +113,7 @@ export class EventsController {
    * complete|timeout.
    */
   @Sse('notifications/:encounterId/stream')
+  @RequirePermissions(PATIENT_MGMT_PERMISSIONS.read)
   @ApiCookieAuth('cookieAuth')
   streamNotifications(
     @Req() req: AuthenticatedRequest,
