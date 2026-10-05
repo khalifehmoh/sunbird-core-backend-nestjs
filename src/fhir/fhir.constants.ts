@@ -48,11 +48,15 @@ export const READONLY_RESOURCE_TYPES = [
 export const ALLOWED_OPERATIONS = ['$graphql', 'metadata'] as const;
 
 /**
- * Tags every resource this platform writes with the owning Sunbird tenant, so
- * searches can be constrained with `_tag`. Tenant identity stays in the `core`
- * schema; this is only its projection into FHIR.
+ * Sunbird permission codes (`core.permissions.permission_code`) guarding the
+ * clinical FHIR surface and ADT actions.
  */
-export const TENANT_TAG_SYSTEM = 'https://sunbird.health/fhir/tenant-id';
+export const PATIENT_MGMT_PERMISSIONS = {
+  read: 'PATIENT_MGMT_READ',
+  create: 'PATIENT_MGMT_CREATE',
+  update: 'PATIENT_MGMT_UPDATE',
+  delete: 'PATIENT_MGMT_DELETE',
+} as const;
 
 /** Identifier systems. NPHIES is the Saudi national FHIR R4 exchange. */
 export const NATIONAL_ID_SYSTEM = 'http://nphies.sa/identifier/nationalid';

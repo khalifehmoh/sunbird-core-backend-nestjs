@@ -12,6 +12,7 @@ import { UserStatus } from './user-status.enum';
 type JwtPayload = {
   sub: string;
   role?: string;
+  permissions?: string[];
   tokenType: 'access' | 'refresh';
   sid?: string;
 };
@@ -61,6 +62,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     }
 
     user.role = payload.role ?? null;
+    user.permissions = payload.permissions ?? [];
     return user;
   }
 }

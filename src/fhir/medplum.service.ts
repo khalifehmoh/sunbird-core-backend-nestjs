@@ -1,4 +1,5 @@
 import {
+  ForbiddenException,
   Injectable,
   Logger,
   ServiceUnavailableException,
@@ -6,6 +7,8 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { MedplumClient } from '@medplum/core';
 import { FHIR_JSON_CONTENT_TYPE } from './fhir.constants';
+import type { MedplumActor } from './medplum-actor';
+import { MedplumRegistry, type MedplumTenant } from './medplum-registry';
 
 export type FhirRequest = {
   method: string;
@@ -22,29 +25,40 @@ export type FhirResponse = {
   body: string;
 };
 
+export const ON_BEHALF_OF_HEADER = 'X-Medplum-On-Behalf-Of';
+
+/** Refresh a cached access token this long before Medplum expires it. */
+const TOKEN_EXPIRY_MARGIN_MS = 30_000;
+
+type CachedToken = { value: string; expiresAt: number };
+
 /**
- * Owns the single Medplum connection for this service.
+ * The only place in this service that talks to Medplum.
  *
- * Medplum is reached with an OAuth2 client-credentials grant against a
- * project-scoped `ClientApplication` — one service account for the whole API,
- * not one Medplum identity per human. End users authenticate to Sunbird with
- * the existing JWT cookie and never see Medplum.
+ * Each tenant is its own Medplum `Project`, with a Project Admin
+ * `ClientApplication` that this API authenticates as. Calls are never made as
+ * that client: Medplum builds the request's access policy from an
+ * `X-Medplum-On-Behalf-Of: ProjectMembership/<id>` header, so every request is
+ * delegated to the end user's membership (or the tenant's `system` member for
+ * background work). A request that omitted the header would run with the
+ * client's own Project Admin rights, so there is no code path here that can
+ * send one: callers pass a {@link MedplumActor}, and an actor with no
+ * provisioned membership is refused before anything leaves the process.
  */
 @Injectable()
 export class MedplumService {
   private readonly logger = new Logger(MedplumService.name);
   private readonly enabled: boolean;
   private readonly baseUrl: string;
-  private readonly clientId: string;
-  private readonly clientSecret: string;
-  private client: MedplumClient | undefined;
-  private pendingLogin: Promise<MedplumClient> | undefined;
+  private readonly tokens = new Map<string, CachedToken>();
+  private readonly pendingTokens = new Map<string, Promise<CachedToken>>();
 
-  constructor(config: ConfigService) {
+  constructor(
+    config: ConfigService,
+    private readonly registry: MedplumRegistry,
+  ) {
     this.enabled = config.get<boolean>('medplum.enabled') ?? false;
     this.baseUrl = config.get<string>('medplum.baseUrl') ?? '';
-    this.clientId = config.get<string>('medplum.clientId') ?? '';
-    this.clientSecret = config.get<string>('medplum.clientSecret') ?? '';
   }
 
   get isEnabled(): boolean {
@@ -57,29 +71,18 @@ export class MedplumService {
   }
 
   /**
-   * An authenticated client, logging in on first use and refreshing the access
-   * token when it expires. Concurrent callers share a single login attempt.
+   * A client whose every request is delegated to `actor`. It is built per call
+   * and holds no credentials of its own: the access token and the delegation
+   * header are applied by the fetch wrapper below.
    */
-  async getClient(): Promise<MedplumClient> {
-    if (!this.enabled) {
-      throw new ServiceUnavailableException(
-        'FHIR integration is disabled. Set MEDPLUM_ENABLED=true.',
-      );
-    }
-
-    if (this.client) {
-      await this.client.refreshIfExpired();
-      return this.client;
-    }
-
-    this.pendingLogin ??= this.login();
-    try {
-      return await this.pendingLogin;
-    } finally {
-      // Cleared either way: on success `this.client` short-circuits the next
-      // call, on failure the next call should retry rather than replay it.
-      this.pendingLogin = undefined;
-    }
+  getClient(actor: MedplumActor): MedplumClient {
+    const target = this.resolve(actor);
+    return new MedplumClient({
+      baseUrl: this.baseUrl,
+      cacheTime: 0,
+      fetch: (url, init) =>
+        this.send(target, String(url), init as RequestInit | undefined),
+    });
   }
 
   /**
@@ -89,36 +92,26 @@ export class MedplumService {
    * throw on non-2xx and discard the `OperationOutcome` body, which is exactly
    * what a FHIR-conformant caller needs to see.
    */
-  async request(request: FhirRequest): Promise<FhirResponse> {
-    const client = await this.getClient();
+  async request(
+    actor: MedplumActor,
+    request: FhirRequest,
+  ): Promise<FhirResponse> {
+    const target = this.resolve(actor);
     const url = new URL(`fhir/R4/${request.path}`, this.baseUrl);
     if (request.search) {
       url.search = request.search;
     }
 
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${client.getAccessToken()}`,
-      Accept: FHIR_JSON_CONTENT_TYPE,
-    };
+    const headers: Record<string, string> = { Accept: FHIR_JSON_CONTENT_TYPE };
     if (request.body !== undefined) {
       headers['Content-Type'] = request.contentType ?? FHIR_JSON_CONTENT_TYPE;
     }
 
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method: request.method,
-        headers,
-        body: request.body,
-      });
-    } catch (error) {
-      this.logger.error(
-        `FHIR request failed: ${request.method} ${request.path}`,
-        error instanceof Error ? error.stack : undefined,
-      );
-      throw new ServiceUnavailableException('FHIR backend is unreachable');
-    }
-
+    const response = await this.send(target, url.toString(), {
+      method: request.method,
+      headers,
+      body: request.body,
+    });
     return {
       status: response.status,
       contentType:
@@ -127,19 +120,120 @@ export class MedplumService {
     };
   }
 
-  private async login(): Promise<MedplumClient> {
-    const client = new MedplumClient({ baseUrl: this.baseUrl, fetch });
+  private resolve(actor: MedplumActor): DelegatedTarget {
+    if (!this.enabled) {
+      throw new ServiceUnavailableException(
+        'FHIR integration is disabled. Set MEDPLUM_ENABLED=true.',
+      );
+    }
+    const tenant = this.registry.tenant(actor.tenantId);
+    if (!tenant) {
+      throw new ForbiddenException('Tenant has no clinical data store');
+    }
+    const member = tenant.members[actor.userId];
+    if (!member) {
+      throw new ForbiddenException(
+        'User has no clinical data access. Run npm run medplum:provision to sync memberships.',
+      );
+    }
+    return {
+      tenantId: actor.tenantId,
+      tenant,
+      membershipId: member.membershipId,
+    };
+  }
+
+  /**
+   * The single egress point. The delegation header is set unconditionally and
+   * overrides anything a caller supplied, so no header that originated in a
+   * browser request can change whose rights a call runs with.
+   */
+  private async send(
+    target: DelegatedTarget,
+    url: string,
+    init: RequestInit | undefined,
+    isRetry = false,
+  ): Promise<Response> {
+    const token = await this.accessToken(target);
+    const headers = new Headers(init?.headers);
+    headers.set('Authorization', `Bearer ${token}`);
+    headers.set(
+      ON_BEHALF_OF_HEADER,
+      `ProjectMembership/${target.membershipId}`,
+    );
+
+    let response: Response;
     try {
-      await client.startClientLogin(this.clientId, this.clientSecret);
+      response = await fetch(url, { ...init, headers });
     } catch (error) {
       this.logger.error(
-        `Medplum client login failed against ${this.baseUrl}`,
+        `FHIR request failed: ${init?.method ?? 'GET'} ${url}`,
         error instanceof Error ? error.stack : undefined,
       );
       throw new ServiceUnavailableException('FHIR backend is unreachable');
     }
-    this.logger.log(`Connected to Medplum at ${this.baseUrl}`);
-    this.client = client;
-    return client;
+
+    if (response.status === 401 && !isRetry) {
+      // Token revoked or the Medplum signing key rotated: log in again once.
+      this.tokens.delete(target.tenantId);
+      return this.send(target, url, init, true);
+    }
+    return response;
+  }
+
+  private async accessToken(target: DelegatedTarget): Promise<string> {
+    const cached = this.tokens.get(target.tenantId);
+    if (cached && cached.expiresAt - TOKEN_EXPIRY_MARGIN_MS > Date.now()) {
+      return cached.value;
+    }
+
+    let pending = this.pendingTokens.get(target.tenantId);
+    if (!pending) {
+      pending = this.login(target.tenant);
+      this.pendingTokens.set(target.tenantId, pending);
+    }
+    try {
+      const token = await pending;
+      this.tokens.set(target.tenantId, token);
+      return token.value;
+    } finally {
+      this.pendingTokens.delete(target.tenantId);
+    }
+  }
+
+  private async login(tenant: MedplumTenant): Promise<CachedToken> {
+    try {
+      const response = await fetch(new URL('oauth2/token', this.baseUrl), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'client_credentials',
+          client_id: tenant.clientId,
+          client_secret: tenant.clientSecret,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`token endpoint answered ${response.status}`);
+      }
+      const json = (await response.json()) as {
+        access_token: string;
+        expires_in?: number;
+      };
+      return {
+        value: json.access_token,
+        expiresAt: Date.now() + (json.expires_in ?? 3600) * 1000,
+      };
+    } catch (error) {
+      this.logger.error(
+        `Medplum client login failed for project ${tenant.projectId}: ${String(error)}`,
+      );
+      throw new ServiceUnavailableException('FHIR backend is unreachable');
+    }
   }
 }
+
+type DelegatedTarget = {
+  tenantId: string;
+  tenant: MedplumTenant;
+  membershipId: string;
+};

@@ -1,7 +1,7 @@
 import {
+  BadRequestException,
   Body,
   Controller,
-  ForbiddenException,
   Get,
   Headers,
   MessageEvent,
@@ -25,6 +25,8 @@ import type { Request } from 'express';
 import { Observable } from 'rxjs';
 import { Public } from '../auth/public.decorator';
 import { User } from '../database/entities/user.entity';
+import { actorOf } from '../fhir/medplum-actor';
+import { MedplumRegistry } from '../fhir/medplum-registry';
 import { EventsService } from './events.service';
 
 type AuthenticatedRequest = Request & { user: User };
@@ -39,6 +41,7 @@ export class EventsController {
   constructor(
     private readonly events: EventsService,
     private readonly config: ConfigService,
+    private readonly registry: MedplumRegistry,
   ) {}
 
   /**
@@ -50,6 +53,7 @@ export class EventsController {
   @ApiExcludeEndpoint()
   async fhirSubscription(
     @Headers('x-sunbird-subscription-secret') secret: string | undefined,
+    @Query('tenantId') tenantId: string | undefined,
     @Body() body: Encounter | { resourceType?: string },
   ): Promise<{ accepted: boolean; jobId?: string }> {
     this.assertEnabled();
@@ -64,7 +68,14 @@ export class EventsController {
       return { accepted: false };
     }
 
-    const result = await this.events.enqueueFromEncounter(body as Encounter);
+    if (!tenantId || !this.registry.tenant(tenantId)) {
+      throw new BadRequestException('Unknown tenantId');
+    }
+
+    const result = await this.events.enqueueFromEncounter(
+      body as Encounter,
+      tenantId,
+    );
     return { accepted: true, jobId: result.jobId };
   }
 
@@ -78,13 +89,10 @@ export class EventsController {
     @Param('encounterId') encounterId: string,
   ) {
     this.assertEnabled();
-    const tenantId = req.user?.tenant?.tenantId;
-    if (!tenantId) {
-      throw new ForbiddenException('User is not associated with a tenant');
-    }
+    const actor = actorOf(req.user);
     const communications = await this.events.listNotifications(
       encounterId,
-      tenantId,
+      actor,
     );
     return {
       encounterId,
@@ -106,15 +114,10 @@ export class EventsController {
     @Query('timeoutMs') timeoutMsRaw?: string,
   ): Observable<MessageEvent> {
     this.assertEnabled();
-    const tenantId = req.user?.tenant?.tenantId;
-    if (!tenantId) {
-      throw new ForbiddenException('User is not associated with a tenant');
-    }
+    const actor = actorOf(req.user);
     const parsed = Number(timeoutMsRaw);
     const timeoutMs =
-      Number.isFinite(parsed) && parsed > 0
-        ? Math.min(parsed, 30_000)
-        : 15_000;
+      Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 30_000) : 15_000;
 
     return new Observable<MessageEvent>((subscriber) => {
       let cancelled = false;
@@ -123,7 +126,7 @@ export class EventsController {
         try {
           for await (const snapshot of this.events.watchNotifications(
             encounterId,
-            tenantId,
+            actor,
             timeoutMs,
           )) {
             if (cancelled) break;
