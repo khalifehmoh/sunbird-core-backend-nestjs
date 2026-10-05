@@ -318,6 +318,19 @@ async function main() {
     });
     record('discharge (A03) succeeds', discharge.status === 200, `-> ${discharge.status}`);
 
+    const ownNotifications = await call(USERS.aMain, 'GET', `/events/notifications/${encounterId}`);
+    if (ownNotifications.status === 503) {
+      console.log('SKIP  event notification isolation (EVENTS_ENABLED is false)');
+    } else {
+      record('own-branch user can read the encounter notifications', ownNotifications.status === 200, `-> ${ownNotifications.status}`);
+      const otherBranch = await call(USERS.aNorth, 'GET', `/events/notifications/${encounterId}`);
+      record('other-branch user cannot read them', otherBranch.status === 404, `-> ${otherBranch.status}`);
+      const otherTenant = await call(USERS.bMain, 'GET', `/events/notifications/${encounterId}`);
+      record('other-tenant user cannot read them', otherTenant.status === 404, `-> ${otherTenant.status}`);
+      const noPermission = await call(USERS.lab, 'GET', `/events/notifications/${encounterId}`);
+      record('user without PATIENT_MGMT_READ cannot read them', noPermission.status === 403, `-> ${noPermission.status}`);
+    }
+
     const after = (await call(USERS.aMain, 'GET', '/adt/beds')).json?.locations ?? [];
     const stillOccupied = after.filter((l) => l.occupiedByEncounterId === encounterId);
     record('beds are released after discharge', stillOccupied.length === 0);

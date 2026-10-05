@@ -11,8 +11,8 @@ async function login() {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      username: 'admin@alrajhimedical.sa',
-      password: 'Sunbird@Local1',
+      username: process.env.DEMO_USERNAME ?? 'admin@alrajhimedical.sa',
+      password: process.env.DEMO_PASSWORD ?? 'Sunbird@Local1',
       rememberMe: false,
     }),
   });

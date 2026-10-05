@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Provision the event-driven spike: one Medplum Bot + two Subscriptions that
- * fire on Encounter updates.
+ * Provision the event-driven spike in every tenant Project: one Medplum Bot +
+ * two Subscriptions that fire on Encounter updates.
  *
  *   Path A — Subscription → Bot (runs inside Medplum vmcontext)
  *   Path B — Subscription → Nest rest-hook → BullMQ on Medplum Redis
@@ -17,6 +17,7 @@ const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
 const ENV_PATH = path.join(ROOT, '.env');
+const lib = require('./lib/medplum-admin');
 
 const BOT_NAME = 'Spike: discharge notification';
 const SUB_BOT_REASON = 'Spike: Encounter → Medplum Bot (discharge notification)';
@@ -25,13 +26,6 @@ const SUB_BULLMQ_REASON =
 const EVENT_PATH_SYSTEM = 'https://sunbird.health/fhir/event-path';
 const EVENT_NOTIFICATION_SYSTEM =
   'https://sunbird.health/fhir/event-notification';
-
-const SUPER_ADMIN_CLIENT_ID =
-  process.env.MEDPLUM_SUPER_ADMIN_CLIENT_ID ??
-  '209d6772-7c4c-46d6-bb98-51fb24d41edb';
-const SUPER_ADMIN_CLIENT_SECRET =
-  process.env.MEDPLUM_SUPER_ADMIN_CLIENT_SECRET ??
-  'f794e61944c87470475dbc1b7546be030d6ba3d71394a733b44d19815979f032';
 
 function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return;
@@ -59,9 +53,10 @@ function cfg() {
       /\/?$/,
       '/',
     ),
-    clientId: process.env.MEDPLUM_CLIENT_ID,
-    clientSecret: process.env.MEDPLUM_CLIENT_SECRET,
-    projectId: process.env.MEDPLUM_PROJECT_ID,
+    tenantsFile: path.resolve(
+      ROOT,
+      process.env.MEDPLUM_TENANTS_FILE ?? '.medplum/tenants.json',
+    ),
     webhookUrl:
       process.env.EVENTS_WEBHOOK_URL ||
       'http://host.docker.internal:8080/api/v1/events/fhir-subscription',
@@ -69,32 +64,6 @@ function cfg() {
       process.env.EVENTS_SUBSCRIPTION_SECRET ||
       'local-subscription-secret-change-me',
   };
-}
-
-async function token(c) {
-  const body = new URLSearchParams({
-    grant_type: 'client_credentials',
-    client_id: c.clientId,
-    client_secret: c.clientSecret,
-  });
-  const res = await fetch(new URL('oauth2/token', c.baseUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body,
-  });
-  if (!res.ok) {
-    throw new Error(`token failed: ${res.status} ${await res.text()}`);
-  }
-  const json = await res.json();
-  return json.access_token;
-}
-
-async function adminToken(c) {
-  return token({
-    ...c,
-    clientId: SUPER_ADMIN_CLIENT_ID,
-    clientSecret: SUPER_ADMIN_CLIENT_SECRET,
-  });
 }
 
 async function fhir(c, accessToken, method, urlPath, body) {
@@ -149,13 +118,6 @@ async function handler(medplum, event) {
       return (id.system || '').includes('visit-number');
     })?.value || encounter.id;
 
-  const tenantTags = (encounter.meta && encounter.meta.tag
-    ? encounter.meta.tag
-    : []
-  ).filter(function (t) {
-    return (t.system || '').includes('tenant');
-  });
-
   const communication = {
     resourceType: 'Communication',
     identifier: [
@@ -191,27 +153,11 @@ async function handler(medplum, event) {
       },
     ],
   };
-  if (tenantTags.length) {
-    communication.meta = { tag: tenantTags };
-  }
-
   return medplum.createResource(communication);
 }
 
 exports.handler = handler;
 `.trim();
-}
-
-async function enableProjectBots(c) {
-  const accessToken = await adminToken(c);
-  const project = await fhir(c, accessToken, 'GET', `Project/${c.projectId}`);
-  const features = new Set(project.features ?? []);
-  features.add('bots');
-  await fhir(c, accessToken, 'PUT', `Project/${c.projectId}`, {
-    ...project,
-    features: [...features],
-  });
-  console.log(`Project/${c.projectId} features: ${[...features].join(', ')}`);
 }
 
 async function ensureBot(c, accessToken) {
@@ -287,28 +233,47 @@ async function ensureSubscription(c, accessToken, reason, channel) {
   return created;
 }
 
-async function main() {
-  const c = cfg();
-  if (!c.clientId || !c.clientSecret) {
-    throw new Error('MEDPLUM_CLIENT_ID/SECRET missing — run npm run medplum:up first');
-  }
-  const accessToken = await token(c);
-  await enableProjectBots(c);
-  const bot = await ensureBot(c, accessToken);
-  await deactivateStaleSubscriptions(c, accessToken);
-  await ensureSubscription(c, accessToken, SUB_BOT_REASON, {
+async function provisionTenant(c, tenantId, tenant) {
+  // Project Admin client of this tenant: provisioning only. Bots and
+  // Subscriptions are Project configuration, which On-Behalf-Of users cannot
+  // write.
+  const accessToken = await lib.getToken(
+    c.baseUrl,
+    tenant.clientId,
+    tenant.clientSecret,
+  );
+  const tc = { ...c, projectId: tenant.projectId };
+  console.log(`\n== ${tenant.tenantCode} (Project/${tenant.projectId})`);
+  const bot = await ensureBot(tc, accessToken);
+  await deactivateStaleSubscriptions(tc, accessToken);
+  await ensureSubscription(tc, accessToken, SUB_BOT_REASON, {
     type: 'rest-hook',
     endpoint: `Bot/${bot.id}`,
   });
-  await ensureSubscription(c, accessToken, SUB_BULLMQ_REASON, {
+  const webhook = new URL(c.webhookUrl);
+  webhook.searchParams.set('tenantId', tenantId);
+  await ensureSubscription(tc, accessToken, SUB_BULLMQ_REASON, {
     type: 'rest-hook',
-    endpoint: c.webhookUrl,
+    endpoint: webhook.toString(),
     header: [`X-Sunbird-Subscription-Secret: ${c.secret}`],
   });
+}
+
+async function main() {
+  const c = cfg();
+  const registry = lib.loadRegistry(c.tenantsFile);
+  const tenants = Object.entries(registry.tenants);
+  if (tenants.length === 0) {
+    throw new Error(
+      `No tenants in ${c.tenantsFile} - run npm run medplum:up first`,
+    );
+  }
+  for (const [tenantId, tenant] of tenants) {
+    await provisionTenant(c, tenantId, tenant);
+  }
   console.log(`
-Event paths ready.
-  Bot endpoint:        Bot/${bot.id} (runAsUser)
-  BullMQ webhook:      ${c.webhookUrl}
+Event paths ready for ${tenants.length} tenant(s).
+  BullMQ webhook:      ${c.webhookUrl}?tenantId=<tenant>
 Enable Nest with EVENTS_ENABLED=true, restart the API, then:
   npm run events:demo
 `);
