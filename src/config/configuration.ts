@@ -32,6 +32,10 @@ export const configuration = () => ({
     baseUrl: process.env.MEDPLUM_BASE_URL ?? 'http://localhost:8103/',
     tenantsFile: process.env.MEDPLUM_TENANTS_FILE ?? '.medplum/tenants.json',
   },
+  integration: {
+    // Shared secret for the machine-to-machine HL7 endpoint. Unset disables it.
+    apiKey: process.env.INTEGRATION_API_KEY || undefined,
+  },
   events: {
     enabled: process.env.EVENTS_ENABLED === 'true',
     subscriptionSecret:
@@ -84,6 +88,10 @@ export const environmentSchema = Joi.object({
   // Written by `npm run medplum:provision`: one Project and service client per
   // tenant, plus each user's ProjectMembership. Read-only for the API.
   MEDPLUM_TENANTS_FILE: Joi.string().default('.medplum/tenants.json'),
+  // Lets an integration engine POST HL7 v2 to /emr/integration/inbound.
+  // Leave unset to disable that endpoint; staff can still submit messages
+  // from the monitor.
+  INTEGRATION_API_KEY: Joi.string().min(24).allow('').optional(),
   EVENTS_ENABLED: Joi.boolean().default(false),
   EVENTS_SUBSCRIPTION_SECRET: Joi.string().min(16).when('EVENTS_ENABLED', {
     is: true,

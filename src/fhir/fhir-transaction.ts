@@ -6,13 +6,31 @@ import type {
   Resource,
 } from '@medplum/fhirtypes';
 
-/** `POST <ResourceType>` entry; Medplum assigns the id. */
-export function createEntry(resource: Resource): BundleEntry {
+/**
+ * `POST <ResourceType>` entry; Medplum assigns the id.
+ *
+ * With `ifNoneExist` (a search query such as `identifier=sys|value`) the
+ * create is conditional: when a match already exists nothing is written and
+ * the response status is `200` rather than `201`.
+ */
+export function createEntry(
+  resource: Resource,
+  ifNoneExist?: string,
+): BundleEntry {
   return {
     fullUrl: `urn:uuid:${randomUUID()}`,
     resource,
-    request: { method: 'POST', url: resource.resourceType },
+    request: {
+      method: 'POST',
+      url: resource.resourceType,
+      ...(ifNoneExist ? { ifNoneExist } : {}),
+    },
   };
+}
+
+/** True when entry `index` of a transaction response was a real create. */
+export function wasCreated(bundle: Bundle, index: number): boolean {
+  return bundle.entry?.[index]?.response?.status?.startsWith('201') ?? false;
 }
 
 /**

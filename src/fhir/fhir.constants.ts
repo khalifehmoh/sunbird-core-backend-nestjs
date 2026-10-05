@@ -9,6 +9,7 @@
 /** Clinical resource types the gateway may read and write. */
 export const WRITABLE_RESOURCE_TYPES = [
   'AllergyIntolerance',
+  'Appointment',
   'Condition',
   'Communication',
   'Coverage',

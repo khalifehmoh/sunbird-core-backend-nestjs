@@ -25,6 +25,7 @@ const SYSTEM_MEMBER_ID = 'system';
  */
 const BRANCH_SCOPED_TYPES = [
   'AllergyIntolerance',
+  'Appointment',
   'Communication',
   'Condition',
   'Coverage',

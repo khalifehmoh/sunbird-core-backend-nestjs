@@ -4,7 +4,9 @@ import {
   HttpException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
+import { EmrEventBus } from '../emr/emr-events';
 import type {
   Bundle,
   BundleEntry,
@@ -66,9 +68,83 @@ export class AdtService {
   constructor(
     private readonly medplum: MedplumService,
     private readonly registry: MedplumRegistry,
+    @Optional() private readonly bus?: EmrEventBus,
   ) {}
 
-  async admit(
+  admit(
+    dto: AdmitRequestDto,
+    actor: MedplumActor,
+  ): Promise<EncounterResponseDto> {
+    return this.announce('A01', actor, this.doAdmit(dto, actor));
+  }
+
+  register(
+    dto: RegisterVisitRequestDto,
+    actor: MedplumActor,
+  ): Promise<EncounterResponseDto> {
+    return this.announce('A04', actor, this.doRegister(dto, actor));
+  }
+
+  transfer(
+    dto: TransferRequestDto,
+    actor: MedplumActor,
+  ): Promise<EncounterResponseDto> {
+    return this.announce('A02', actor, this.doTransfer(dto, actor));
+  }
+
+  discharge(
+    dto: DischargeRequestDto,
+    actor: MedplumActor,
+  ): Promise<EncounterResponseDto> {
+    return this.announce('A03', actor, this.doDischarge(dto, actor));
+  }
+
+  preadmit(
+    dto: PreadmitRequestDto,
+    actor: MedplumActor,
+  ): Promise<EncounterResponseDto> {
+    return this.announce('A05', actor, this.doPreadmit(dto, actor));
+  }
+
+  convertPreadmitToAdmit(
+    encounterId: string,
+    dto: Omit<AdmitRequestDto, 'patientId'>,
+    actor: MedplumActor,
+  ): Promise<EncounterResponseDto> {
+    return this.announce(
+      'A01',
+      actor,
+      this.doConvertPreadmit(encounterId, dto, actor),
+    );
+  }
+
+  /** Publishes the HL7 event once the action has committed; never before. */
+  private async announce(
+    event: string,
+    actor: MedplumActor,
+    action: Promise<EncounterResponseDto>,
+  ): Promise<EncounterResponseDto> {
+    const result = await action;
+    this.bus?.publish({
+      channel: 'emr.adt',
+      event,
+      tenantId: actor.tenantId,
+      actor,
+      patientId: result.patientId ?? undefined,
+      resource: `Encounter/${result.id}`,
+      data: {
+        visitNumber: result.visitNumber,
+        patientClass: result.patientClass,
+        location: result.locationDisplay,
+        periodStart: result.periodStart,
+        periodEnd: result.periodEnd,
+        lengthOfStayDays: result.lengthOfStayDays,
+      },
+    });
+    return result;
+  }
+
+  private async doAdmit(
     dto: AdmitRequestDto,
     actor: MedplumActor,
   ): Promise<EncounterResponseDto> {
@@ -79,7 +155,7 @@ export class AdtService {
     });
   }
 
-  async register(
+  private async doRegister(
     dto: RegisterVisitRequestDto,
     actor: MedplumActor,
   ): Promise<EncounterResponseDto> {
@@ -111,7 +187,7 @@ export class AdtService {
     });
   }
 
-  async transfer(
+  private async doTransfer(
     dto: TransferRequestDto,
     actor: MedplumActor,
   ): Promise<EncounterResponseDto> {
@@ -155,7 +231,7 @@ export class AdtService {
     });
   }
 
-  async discharge(
+  private async doDischarge(
     dto: DischargeRequestDto,
     actor: MedplumActor,
   ): Promise<EncounterResponseDto> {
@@ -188,7 +264,7 @@ export class AdtService {
     });
   }
 
-  async preadmit(
+  private async doPreadmit(
     dto: PreadmitRequestDto,
     actor: MedplumActor,
   ): Promise<EncounterResponseDto> {
@@ -219,7 +295,7 @@ export class AdtService {
     });
   }
 
-  async convertPreadmitToAdmit(
+  private async doConvertPreadmit(
     encounterId: string,
     dto: Omit<AdmitRequestDto, 'patientId'>,
     actor: MedplumActor,

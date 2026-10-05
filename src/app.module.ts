@@ -16,6 +16,7 @@ import { PermissionsModule } from './permissions/permissions.module';
 import { AuditModule } from './audit/audit.module';
 import { FhirModule } from './fhir/fhir.module';
 import { EventsModule } from './events/events.module';
+import { EmrModule } from './emr/emr.module';
 
 @Module({
   imports: [
@@ -50,6 +51,7 @@ import { EventsModule } from './events/events.module';
     AuditModule,
     FhirModule,
     EventsModule,
+    EmrModule,
   ],
   controllers: [HealthController],
   providers: [{ provide: APP_GUARD, useClass: JwtAuthGuard }],

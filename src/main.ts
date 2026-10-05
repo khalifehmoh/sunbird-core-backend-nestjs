@@ -4,7 +4,7 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ValidationError } from 'class-validator';
 import cookieParser from 'cookie-parser';
-import { json } from 'express';
+import { json, text } from 'express';
 import { AppModule } from './app.module';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
 
@@ -25,6 +25,13 @@ async function bootstrap() {
         'application/json-patch+json',
       ],
       limit: '1mb',
+    }),
+  );
+  // HL7 v2 over HTTP posts the message as the raw request body.
+  app.use(
+    text({
+      type: ['text/plain', 'application/hl7-v2', 'x-application/hl7-v2+er7'],
+      limit: '512kb',
     }),
   );
   app.setGlobalPrefix('api/v1');
