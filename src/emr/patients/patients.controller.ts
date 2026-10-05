@@ -46,6 +46,15 @@ export class PatientsController {
     return this.patients.overview(id, actorOf(req.user));
   }
 
+  @Get(':id/encounters')
+  @RequirePermissions(EMR_PERMISSIONS.clinical.read)
+  encounters(
+    @Req() req: AuthenticatedRequest,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.patients.encounters(id, actorOf(req.user));
+  }
+
   @Get(':id/audit')
   @RequirePermissions(EMR_PERMISSIONS.clinical.read)
   audit(

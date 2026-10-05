@@ -46,6 +46,25 @@ const booking = (start: string, overrides = {}) => ({
 });
 
 describe('AppointmentsService', () => {
+  describe('providers', () => {
+    it('lists practitioners by name for the picker', async () => {
+      const { service } = build();
+
+      const { items } = await service.providers(ACTOR);
+
+      expect(items.map((p) => p.id).sort()).toEqual([
+        'doc-1',
+        'doc-2',
+        'prac-1',
+      ]);
+      expect(items.find((p) => p.id === 'doc-1')?.name).toBe(
+        'Dr. Layla Nasser',
+      );
+      // Falls back to the id when a practitioner has no name.
+      expect(items.find((p) => p.id === 'doc-2')?.name).toBe('doc-2');
+    });
+  });
+
   describe('book (S12)', () => {
     it('creates a booked appointment for the patient and provider', async () => {
       const { store, service, events } = build();

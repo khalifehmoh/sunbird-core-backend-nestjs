@@ -41,6 +41,12 @@ export class AppointmentsController {
     return { ...SCHEDULING };
   }
 
+  @Get('providers')
+  @RequirePermissions(EMR_PERMISSIONS.scheduling.read)
+  providers(@Req() req: AuthenticatedRequest) {
+    return this.appointments.providers(actorOf(req.user));
+  }
+
   @Get('slots')
   @RequirePermissions(EMR_PERMISSIONS.scheduling.read)
   slots(

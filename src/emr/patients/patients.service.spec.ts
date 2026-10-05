@@ -536,6 +536,30 @@ describe('PatientsService', () => {
     });
   });
 
+  describe('encounters', () => {
+    it("lists the patient's encounters newest first", async () => {
+      const ctx = build();
+      ctx.store.seed(
+        encounter('e-old', 'patient-1', {
+          status: 'finished',
+          class: { code: 'AMB' },
+          period: { start: '2026-09-01T08:00:00.000Z' },
+        }),
+      );
+      ctx.store.seed(
+        encounter('e-new', 'patient-1', { class: { code: 'IMP' } }),
+      );
+      ctx.store.seed(encounter('e-other', 'patient-2'));
+
+      const { items } = await ctx.service.encounters('patient-1', ACTOR);
+
+      expect(items.map((e) => e.id)).toEqual(['e-new', 'e-old']);
+      await expect(
+        ctx.service.encounters('ghost', ACTOR),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
   describe('audit', () => {
     it('lists versions newest first with what changed in each', async () => {
       const ctx = build();

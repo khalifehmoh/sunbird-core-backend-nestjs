@@ -363,6 +363,25 @@ export class PatientsService {
     return new WardIndex(resourcesOf<Location>(bundle, 'Location'));
   }
 
+  /** A patient's encounters, newest first. */
+  async encounters(
+    id: string,
+    actor: MedplumActor,
+    limit = 50,
+  ): Promise<{ items: ReturnType<typeof toEncounterResponse>[] }> {
+    await this.fhir.readPatient(id, actor);
+    const bundle = await searchBundle(this.fhir.client(actor), 'Encounter', {
+      subject: `Patient/${id}`,
+      _sort: '-date',
+      _count: limit,
+    });
+    return {
+      items: resourcesOf<Encounter>(bundle, 'Encounter').map((encounter) =>
+        toEncounterResponse(encounter),
+      ),
+    };
+  }
+
   // ------------------------------------------------------------- overview
 
   async overview(

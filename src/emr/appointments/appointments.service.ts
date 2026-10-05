@@ -139,6 +139,28 @@ export class AppointmentsService {
     };
   }
 
+  /** Practitioners that can be booked, for the provider picker. */
+  async providers(
+    actor: MedplumActor,
+  ): Promise<{ items: { id: string; name: string }[] }> {
+    const bundle = await searchBundle(this.fhir.client(actor), 'Practitioner', {
+      _count: 200,
+    });
+    const items = resourcesOf<Practitioner>(bundle, 'Practitioner').flatMap(
+      (practitioner) => {
+        if (!practitioner.id) return [];
+        const name = practitioner.name?.[0];
+        const text =
+          name?.text ??
+          [...(name?.prefix ?? []), ...(name?.given ?? []), name?.family]
+            .filter(Boolean)
+            .join(' ');
+        return [{ id: practitioner.id, name: text || practitioner.id }];
+      },
+    );
+    return { items: items.sort((a, b) => a.name.localeCompare(b.name)) };
+  }
+
   /** S12: book a slot. */
   book(
     dto: BookAppointmentDto,
