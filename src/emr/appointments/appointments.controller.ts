@@ -65,6 +65,15 @@ export class AppointmentsController {
     return this.appointments.list(query, actorOf(req.user));
   }
 
+  @Get(':id')
+  @RequirePermissions(EMR_PERMISSIONS.scheduling.read)
+  get(
+    @Req() req: AuthenticatedRequest,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<AppointmentRow> {
+    return this.appointments.get(id, actorOf(req.user));
+  }
+
   /** S12: book. */
   @Post()
   @RequirePermissions(EMR_PERMISSIONS.scheduling.create)

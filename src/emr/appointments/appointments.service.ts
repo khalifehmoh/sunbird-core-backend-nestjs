@@ -139,6 +139,15 @@ export class AppointmentsService {
     };
   }
 
+  async get(id: string, actor: MedplumActor): Promise<AppointmentRow> {
+    const appointment = await this.fhir.read<Appointment>(
+      'Appointment',
+      id,
+      actor,
+    );
+    return this.rowFor(appointment, actor);
+  }
+
   /** Practitioners that can be booked, for the provider picker. */
   async providers(
     actor: MedplumActor,

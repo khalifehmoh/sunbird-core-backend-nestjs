@@ -46,6 +46,26 @@ const booking = (start: string, overrides = {}) => ({
 });
 
 describe('AppointmentsService', () => {
+  describe('get', () => {
+    it('returns one appointment and 404s for an unknown id', async () => {
+      const { service } = build();
+      const booked = await service.book(
+        booking(at('2026-10-04', '09:00')),
+        ACTOR,
+        NOW,
+      );
+
+      await expect(service.get(booked.id, ACTOR)).resolves.toMatchObject({
+        id: booked.id,
+        status: 'booked',
+        patientId: 'patient-1',
+      });
+      await expect(service.get('ghost', ACTOR)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
   describe('providers', () => {
     it('lists practitioners by name for the picker', async () => {
       const { service } = build();
