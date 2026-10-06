@@ -63,3 +63,11 @@ Pages 25–27 (registration, clinical, integration dashboards) are tabs of
 npm run db:migrate      # applies V003 (Flyway scripts in db/migration/core)
 INTEGRATION_API_KEY=<24+ chars> npm run start:dev
 ```
+
+## Simulating an external system
+
+```bash
+npm run hl7:simulate -- --mrn AR-MED-001-00003 [--order ORD-2026-00002] [--provider <practitioner id>]
+npm run hl7:simulate -- --dry-run   # print the messages without sending
+```n
+Sends ORM (new, cancel), ORU (critical and normal) and, with `--provider`, SIU book/cancel to the inbound endpoint using `INTEGRATION_API_KEY` from `.env` and prints each ACK.

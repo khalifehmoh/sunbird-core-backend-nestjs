@@ -25,6 +25,7 @@
     "medplum:provision": "node scripts/medplum-setup.js provision",
     "medplum:seed": "node scripts/medplum-setup.js seed",
     "medplum:events": "node scripts/medplum-events.js",
+    "hl7:simulate": "node scripts/hl7-simulate.js",
     "medplum:check": "node scripts/medplum-tenancy-check.js",
     "events:demo": "node scripts/events-demo.mjs",
     "medplum:down": "node scripts/medplum-setup.js down",
