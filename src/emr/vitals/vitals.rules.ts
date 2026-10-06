@@ -170,6 +170,24 @@ export function isCriticalInterpretation(code: string | undefined): boolean {
   return code !== undefined && CRITICAL_INTERPRETATIONS.includes(code);
 }
 
+/**
+ * Medplum has no `interpretation` search parameter for Observation (it is not
+ * in the FHIR R4 spec), so critical values are found by scanning a window of
+ * observations and filtering here. This is how many a scan reads at most.
+ */
+export const CRITICAL_SCAN_LIMIT = 1000;
+
+/** True when any interpretation coding on the observation is critical. */
+export function hasCriticalInterpretation(observation: {
+  interpretation?: { coding?: { code?: string }[] }[];
+}): boolean {
+  return (observation.interpretation ?? []).some((concept) =>
+    (concept.coding ?? []).some((coding) =>
+      isCriticalInterpretation(coding.code),
+    ),
+  );
+}
+
 export type VitalFlag = 'critical' | 'abnormal' | 'normal' | 'unrated';
 
 export function flagOf(interpretation: string | undefined): VitalFlag {

@@ -23,9 +23,10 @@ import type {
   VitalsResponse,
 } from './vitals.dto';
 import {
-  CRITICAL_INTERPRETATIONS,
+  CRITICAL_SCAN_LIMIT,
   codingFor,
   flagOf,
+  hasCriticalInterpretation,
   interpret,
   quantityFor,
   vitalByKey,
@@ -141,13 +142,19 @@ export class VitalsService {
         ? `Encounter/${query.encounterId}`
         : undefined,
       date: dateRange(query.from, query.to),
-      interpretation: query.criticalOnly
-        ? CRITICAL_INTERPRETATIONS.join(',')
-        : undefined,
       _sort: '-date',
-      _count: query.limit ?? DEFAULT_LIMIT,
+      _count: query.criticalOnly
+        ? CRITICAL_SCAN_LIMIT
+        : (query.limit ?? DEFAULT_LIMIT),
     });
-    return this.respond(resourcesOf<Observation>(bundle, 'Observation'));
+    const observations = resourcesOf<Observation>(bundle, 'Observation');
+    return this.respond(
+      query.criticalOnly
+        ? observations
+            .filter(hasCriticalInterpretation)
+            .slice(0, query.limit ?? DEFAULT_LIMIT)
+        : observations,
+    );
   }
 
   private respond(observations: Observation[]): VitalsResponse {

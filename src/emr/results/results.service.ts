@@ -35,8 +35,9 @@ import {
   searchBundle,
 } from '../fhir-utils';
 import {
-  CRITICAL_INTERPRETATIONS,
+  CRITICAL_SCAN_LIMIT,
   flagOf,
+  hasCriticalInterpretation,
   isCriticalInterpretation,
 } from '../vitals/vitals.rules';
 import type {
@@ -179,15 +180,16 @@ export class ResultsService {
     const client = this.fhir.client(actor);
     const bundle = await searchBundle(client, 'Observation', {
       category: 'laboratory',
-      interpretation: CRITICAL_INTERPRETATIONS.join(','),
       subject: query.patientId ? `Patient/${query.patientId}` : undefined,
       date: dateRange(from, query.to),
       _include: 'Observation:subject',
       _sort: '-date',
-      _count: query.limit ?? DEFAULT_LIMIT,
+      _count: CRITICAL_SCAN_LIMIT,
     });
     const patients = indexById<Patient>(bundle, 'Patient');
-    const observations = resourcesOf<Observation>(bundle, 'Observation');
+    const observations = resourcesOf<Observation>(bundle, 'Observation')
+      .filter(hasCriticalInterpretation)
+      .slice(0, query.limit ?? DEFAULT_LIMIT);
 
     const reportIds = new Map<string, string>();
     if (observations.length > 0) {

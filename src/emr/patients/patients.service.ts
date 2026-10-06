@@ -43,6 +43,10 @@ import { OrdersService } from '../orders/orders.service';
 import { ResultsService } from '../results/results.service';
 import { VitalsService } from '../vitals/vitals.service';
 import {
+  CRITICAL_SCAN_LIMIT,
+  hasCriticalInterpretation,
+} from '../vitals/vitals.rules';
+import {
   PHONE_PATTERN,
   type PatientClassCode,
   type RegisteredPatient,
@@ -306,15 +310,17 @@ export class PatientsService {
     const from = new Date(now.getTime() - CRITICAL_WINDOW_DAYS * 86_400_000);
     const bundle = await searchBundle(this.fhir.client(actor), 'Observation', {
       category: 'laboratory',
-      interpretation: ['LL', 'HH', 'AA'],
       date: `ge${from.toISOString()}`,
-      _count: 200,
+      _sort: '-date',
+      _count: CRITICAL_SCAN_LIMIT,
     });
     return new Set(
-      resourcesOf<Observation>(bundle, 'Observation').flatMap((observation) => {
-        const id = idOfReference(observation.subject?.reference, 'Patient');
-        return id ? [id] : [];
-      }),
+      resourcesOf<Observation>(bundle, 'Observation')
+        .filter(hasCriticalInterpretation)
+        .flatMap((observation) => {
+          const id = idOfReference(observation.subject?.reference, 'Patient');
+          return id ? [id] : [];
+        }),
     );
   }
 

@@ -1,5 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import type { Appointment, Encounter, Patient } from '@medplum/fhirtypes';
+import type {
+  Appointment,
+  Encounter,
+  Observation,
+  Patient,
+} from '@medplum/fhirtypes';
 import { toEncounterResponse } from '../../fhir/adt.mapper';
 import type { MedplumActor } from '../../fhir/medplum-actor';
 import { FhirAccess } from '../common/fhir-access';
@@ -20,6 +25,10 @@ import { addDays } from '../appointments/scheduling';
 import { IntegrationService } from '../integration/integration.service';
 import { PatientsService } from '../patients/patients.service';
 import { ResultsService } from '../results/results.service';
+import {
+  CRITICAL_SCAN_LIMIT,
+  hasCriticalInterpretation,
+} from '../vitals/vitals.rules';
 
 const ACTIVITY_DAYS = 7;
 const ENCOUNTER_WINDOW_LIMIT = 1000;
@@ -32,7 +41,6 @@ const LIVE_APPOINTMENT_STATUSES = [
   'checked-in',
   'fulfilled',
 ];
-const CRITICAL_CODES = ['LL', 'HH', 'AA'];
 
 type Window = { start: string; end: string };
 
@@ -409,12 +417,22 @@ export class DashboardService {
     return this.integration.stats(actor.tenantId, now);
   }
 
-  private criticalToday(actor: MedplumActor, window: Window): Promise<number> {
-    return countOf(this.fhir.client(actor), 'Observation', {
+  /**
+   * Counted by scanning the day's laboratory observations: Medplum has no
+   * `interpretation` search parameter, so it cannot count them server-side.
+   */
+  private async criticalToday(
+    actor: MedplumActor,
+    window: Window,
+  ): Promise<number> {
+    const bundle = await searchBundle(this.fhir.client(actor), 'Observation', {
       category: 'laboratory',
-      interpretation: CRITICAL_CODES,
       date: dateRange(window.start, window.end),
+      _count: CRITICAL_SCAN_LIMIT,
     });
+    return resourcesOf<Observation>(bundle, 'Observation').filter(
+      hasCriticalInterpretation,
+    ).length;
   }
 
   private vitalsToday(actor: MedplumActor, window: Window): Promise<number> {
