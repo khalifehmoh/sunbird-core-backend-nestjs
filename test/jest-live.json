@@ -1,0 +1,11 @@
+{
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "rootDir": ".",
+  "testEnvironment": "node",
+  "setupFiles": ["<rootDir>/live/setup-live-env.ts"],
+  "testRegex": ".live-spec.ts$",
+  "testTimeout": 90000,
+  "transform": {
+    "^.+\\.(t|j)s$": "ts-jest"
+  }
+}

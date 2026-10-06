@@ -73,6 +73,9 @@ describe('patientSearchParams', () => {
     expect(patientSearchParams('t1-00042')).toEqual({
       identifier: `${MRN_SYSTEM}|T1-00042`,
     });
+    expect(patientSearchParams('ar-med-001-00005')).toEqual({
+      identifier: `${MRN_SYSTEM}|AR-MED-001-00005`,
+    });
     expect(patientSearchParams('Aisha')).toEqual({ name: 'Aisha' });
     expect(patientSearchParams('عائشة')).toEqual({ name: 'عائشة' });
   });
@@ -352,6 +355,25 @@ describe('PatientsService', () => {
       expect(
         (await ctx.service.list({ filter: 'ed' }, ACTOR, NOW)).items,
       ).toEqual([]);
+    });
+
+    it('counts an ED patient who has arrived but is not yet in progress', async () => {
+      const ctx = build();
+      seedClinicalData(ctx);
+      ctx.store.seed(
+        encounter('enc-ed', 'patient-2', {
+          class: { code: 'EMER' },
+          status: 'arrived',
+          period: { start: '2026-10-06T08:30:00.000Z' },
+        }),
+      );
+
+      const result = await ctx.service.list({ filter: 'ed' }, ACTOR, NOW);
+
+      expect(result.items.map((i) => i.mrn)).toEqual(['T1-00002']);
+      expect(result.counts.ed).toBe(1);
+      // The sickest setting wins when a patient has several open visits.
+      expect(result.items[0].patientClass).toBe('EMER');
     });
 
     it('filters to patients with a recent critical result', async () => {

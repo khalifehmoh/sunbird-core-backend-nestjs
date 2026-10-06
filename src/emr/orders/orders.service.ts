@@ -228,7 +228,13 @@ export class OrdersService {
       resource: `ServiceRequest/${id}`,
       data: { reason },
     });
-    return this.toRow(saved, new Map());
+    const patient = patientId
+      ? await this.fhir.readPatient(patientId, actor).catch(() => undefined)
+      : undefined;
+    return this.toRow(
+      saved,
+      new Map(patient && patientId ? [[patientId, patient]] : []),
+    );
   }
 
   /**

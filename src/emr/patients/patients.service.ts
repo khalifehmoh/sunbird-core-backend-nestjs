@@ -60,6 +60,16 @@ import { WardIndex } from './ward-index';
 
 const DEFAULT_LIMIT = 50;
 const ACTIVE_ENCOUNTER_LIMIT = 200;
+/**
+ * An open visit. ED registration (A04) starts as `arrived` until triage, so
+ * `in-progress` alone would hide every ED patient from the worklist.
+ */
+const ACTIVE_ENCOUNTER_STATUSES: readonly string[] = [
+  'arrived',
+  'triaged',
+  'in-progress',
+];
+const ACTIVE_ENCOUNTER_STATUS_QUERY = ACTIVE_ENCOUNTER_STATUSES.join(',');
 const CRITICAL_WINDOW_DAYS = 7;
 const MAX_MRN_ATTEMPTS = 5;
 
@@ -152,7 +162,9 @@ export function patientSearchParams(q: string | undefined): SearchParams {
   const text = (q ?? '').trim();
   if (!text) return {};
   if (PHONE_PATTERN.test(text)) return { phone: text };
-  if (/^[A-Za-z0-9]+-\d+$/.test(text)) {
+  // MRNs are `<tenant code>-<sequence>` and tenant codes contain hyphens
+  // themselves (AR-MED-001-00005), so allow any number of leading segments.
+  if (/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*-\d+$/.test(text)) {
     return { identifier: `${MRN_SYSTEM}|${text.toUpperCase()}` };
   }
   return { name: text };
@@ -199,7 +211,7 @@ export class PatientsService {
     const classCode = CLASS_OF_FILTER[filter];
     if (classCode) {
       const bundle = await searchBundle(client, 'Encounter', {
-        status: 'in-progress',
+        status: ACTIVE_ENCOUNTER_STATUS_QUERY,
         class: classCode,
         _include: 'Encounter:subject',
         _sort: '-date',
@@ -292,7 +304,10 @@ export class PatientsService {
   ): Promise<Record<WorklistFilter, number>> {
     const client = this.fhir.client(actor);
     const active = (code: PatientClassCode) =>
-      countOf(client, 'Encounter', { status: 'in-progress', class: code });
+      countOf(client, 'Encounter', {
+        status: ACTIVE_ENCOUNTER_STATUS_QUERY,
+        class: code,
+      });
     const [all, inpatient, opd, ed] = await Promise.all([
       countOf(client, 'Patient', {}),
       active('IMP'),
@@ -330,7 +345,7 @@ export class PatientsService {
   ): Promise<Encounter[]> {
     const bundle = await searchBundle(this.fhir.client(actor), 'Encounter', {
       subject: patientIds.map((id) => `Patient/${id}`),
-      status: 'in-progress',
+      status: ACTIVE_ENCOUNTER_STATUS_QUERY,
       _sort: '-date',
       _count: ACTIVE_ENCOUNTER_LIMIT,
     });
@@ -426,8 +441,8 @@ export class PatientsService {
       this.overviewCounts(id, actor),
     ]);
 
-    const active = encounters.find(
-      (encounter) => encounter.status === 'in-progress',
+    const active = encounters.find((encounter) =>
+      ACTIVE_ENCOUNTER_STATUSES.includes(encounter.status),
     );
     const activeView = active ? toEncounterResponse(active) : null;
     const ward = activeView?.locationId
