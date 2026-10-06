@@ -253,3 +253,35 @@ export async function eventually<T>(
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
 }
+
+type ClinicDay = {
+  date: string;
+  working: boolean;
+  slots: { start: string; status: string }[];
+};
+
+/** First free 30-minute slot for a provider, looking up to two weeks ahead. */
+export async function nextFreeSlot(
+  live: Live,
+  practitionerId: string,
+): Promise<{ start: string; date: string }> {
+  const today = new Date().toISOString().slice(0, 10);
+  const days = (
+    await live.admin
+      .get('/api/v1/emr/appointments/slots')
+      .query({ practitionerId, from: today, days: 14 })
+      .expect(200)
+  ).body as { days: ClinicDay[] };
+  for (const day of days.days) {
+    const slot = day.slots.find((s) => s.status === 'free');
+    if (slot) return { start: slot.start, date: day.date };
+  }
+  throw new Error('No free clinic slot in the next two weeks');
+}
+
+/** Clinic-local HL7 wall-clock (`YYYYMMDDHHMMSS`) of a UTC ISO instant. */
+export function hl7LocalOf(iso: string): string {
+  const utc = Date.parse(iso);
+  const local = new Date(utc + 180 * 60_000).toISOString();
+  return local.replace(/[-:T]/g, '').slice(0, 14);
+}

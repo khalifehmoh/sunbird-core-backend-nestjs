@@ -42,8 +42,9 @@ on purpose, reason given).
 ## Test coverage
 
 - Unit: 400+ Jest specs against an in-memory FHIR store (`npm test`).
-- Live e2e, real Medplum and Postgres: `npm run test:e2e:live` (`test/live/`). 41 tests:
-  patients (10), ADT (20), orders and HL7 (11). Needs the docker stack and
+- Live e2e, real Medplum and Postgres: `npm run test:e2e:live` (`test/live/`). 60 tests:
+  patients (10), ADT (20), orders and HL7 (11), appointments and SIU (8), vitals (4),
+  diagnoses (3), integration retry (4). Needs the docker stack and
   `MEDPLUM_ENABLED=true`; the data it creates is tagged `E2E<run>` and is not deleted.
 - Browser: Playwright in the frontend repo (`npm run test:e2e`).
 
